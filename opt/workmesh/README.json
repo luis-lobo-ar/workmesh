@@ -1,0 +1,137 @@
+{
+  "name": "WorkMesh",
+  "tagline": "Docs-first project and task orchestration for developers and coding agents.",
+  "standalone_distribution": {
+    "repository": "https://github.com/luis-lobo-ar/workmesh",
+    "releases": "https://github.com/luis-lobo-ar/workmesh/releases",
+    "authority": "Mesh monorepo; standalone repository is a generated snapshot",
+    "export": "bin/export-product workmesh <empty-directory-outside-Mesh>"
+  },
+  "summary": [
+    "WorkMesh keeps repo-local planning state next to code.",
+    "Primary human documentation lives in docs/README.md.",
+    "README.md is a short landing page with install and links.",
+    "The mesh monorepo root is the primary source of truth for active WorkMesh development.",
+    "WorkMesh discovers active task and epic Markdown files recursively under tasks/ for customer/project/application/feature organization."
+  ],
+  "artifacts": {
+    "cli": "workmesh",
+    "mcp": "workmesh-mcp",
+    "core": "workmesh-core",
+    "render": "workmesh-render",
+    "tools": "workmesh-tools",
+    "mcp_server": "workmesh-mcp-server"
+  },
+  "storage": {
+    "repo_local": [
+      "tasks/",
+      ".workmesh/context.json",
+      ".workmesh/truth/",
+      "docs/projects/<project-id>/",
+      "tasks/**/{task,epic}-*.md"
+    ],
+    "global": [
+      "~/.workmesh/"
+    ]
+  },
+  "install": {
+    "verify": [
+      "workmesh --version",
+      "workmesh-mcp --version"
+    ],
+    "build_from_source": [
+      "git clone https://github.com/luis-lobo-ar/workmesh.git",
+      "cd workmesh",
+      "cargo build -p workmesh",
+      "cargo build -p workmesh-mcp"
+    ],
+    "codex_mcp_example": {
+      "command": "/usr/local/bin/workmesh-mcp",
+      "args": []
+    }
+  },
+  "canonical_docs": {
+    "manual": "docs/README.md",
+    "architecture": "docs/architecture.md",
+    "commands": "docs/reference/commands.md",
+    "setup": "docs/setup/run-modes-and-agent-mcp.md",
+    "changelog": "CHANGELOG.md"
+  },
+  "monorepo": {
+    "source_of_truth": "mesh repository root",
+    "active_ecosystem_backlog": "tasks/",
+    "product_local_history_note": "opt/workmesh/workmesh/ is retained as WorkMesh-owned project/history content inside the monorepo, not as a separate repository."
+  },
+  "workflow": {
+    "mode": "codex-first",
+    "entry_prompts": [
+      "Bootstrap WorkMesh in this repo. Use MCP if available, otherwise CLI.",
+      "Use WorkMesh for this feature end to end. Create/update PRD, create and maintain tasks with acceptance criteria and definition of done, keep context current, and track stable decisions in Truth Ledger."
+    ],
+    "resume_prompt": "Rehydrate this session with WorkMesh. Read current context, accepted truths, active workstream state, and next actionable tasks. Then summarize what I was doing, what constraints still apply, and the next concrete step."
+  },
+  "skills": {
+    "router": "workmesh",
+    "cli": "workmesh-cli",
+    "mcp": "workmesh-mcp",
+    "shared_doctrine": "Each canonical skill bundles the same operating doctrine covering task quality, compaction-safe persistence, truth/note/task boundaries, and output rules.",
+    "canonical_source_dir": "skills/",
+    "project_paths": {
+      "codex": ".agents/skills/",
+      "cursor": ".agents/skills/",
+      "claude": ".claude/skills/"
+    },
+    "user_paths": {
+      "codex": "~/.codex/skills/",
+      "cursor": "~/.cursor/skills/",
+      "claude": "~/.claude/skills/"
+    }
+  },
+  "rules": {
+    "task_sections": [
+      "Description",
+      "Acceptance Criteria",
+      "Definition of Done"
+    ],
+    "actionable_statuses": [
+      "To Do",
+      "In Progress"
+    ],
+    "draft_statuses": [
+      "Draft",
+      "Needs Refinement"
+    ],
+    "task_creation": "By default, new actionable tasks must provide description, acceptance criteria, and definition of done. Use explicit draft mode for incomplete tasks. Repos can override the required task-quality fields in config.",
+    "definition_of_done": "By default, Definition of Done must be outcome-based, not hygiene-only. This requirement is configurable.",
+    "task_quality_config_keys": [
+      "task_require_description",
+      "task_require_acceptance_criteria",
+      "task_require_definition_of_done",
+      "task_require_outcome_based_definition_of_done"
+    ],
+    "maintenance_fixers": [
+      "uid",
+      "deps",
+      "ids",
+      "filenames"
+    ],
+    "mutation_responses": "Compact by default; use verbose=true only when richer post-write state is required.",
+    "resume_checklist": [
+      "restore current context",
+      "read accepted truths for current scope",
+      "inspect workstream restore state if parallel work exists",
+      "identify the active task or smallest valid working set",
+      "summarize current objective, constraints, and next step before new implementation work"
+    ],
+    "task_directory_organization": "Active task and epic Markdown files may be nested under tasks/ by customer, project, application/service, initiative, or feature. Directory paths are human navigation only; id, kind, parent, dependencies, labels, phase, and status front matter remain the source of truth.",
+    "archive_structure": "Archive writes use archive/<yyyy>/<mm>/<status>/<relative-task-path>. Date comes first, status is normalized, and the original path below tasks/ is preserved; legacy archive/YYYY-MM files remain readable."
+  },
+  "architecture": {
+    "workmesh-core": "domain logic, storage, state",
+    "workmesh-render": "renderers",
+    "workmesh-tools": "shared tool contract",
+    "workmesh": "CLI adapter",
+    "workmesh-mcp-server": "MCP adapter",
+    "workmesh-mcp": "stdio wrapper"
+  }
+}

@@ -1,0 +1,8280 @@
+#![allow(clippy::too_many_arguments)]
+
+use std::collections::HashSet;
+use std::ffi::OsString;
+use std::io::{self, IsTerminal, Read};
+use std::path::{Path, PathBuf};
+
+use anyhow::Result;
+use chrono::{Duration, Local, NaiveDate};
+use clap::{ArgAction, Args, Parser, Subcommand, ValueEnum};
+
+mod version;
+
+use workmesh_core::archive::{archive_tasks, ArchiveOptions};
+use workmesh_core::audit::{append_audit_event, AuditEvent};
+use workmesh_core::backlog::{locate_backlog_dir, resolve_backlog, BacklogResolution};
+use workmesh_core::bootstrap::{bootstrap_repo, BootstrapOptions};
+use workmesh_core::config::{
+    global_config_path, load_config, load_config_with_path, load_global_config,
+    load_global_config_with_path, resolve_auto_session_default,
+    resolve_auto_session_default_with_source, resolve_task_validation_rules,
+    resolve_task_validation_rules_with_source, resolve_worktrees_default,
+    resolve_worktrees_default_with_source, resolve_worktrees_dir_with_source,
+    update_do_not_migrate, write_config, write_global_config,
+};
+use workmesh_core::context::{
+    clear_context, context_path, extract_task_id_from_branch, infer_project_id, load_context,
+    save_context, ContextScope, ContextScopeMode, ContextState,
+};
+use workmesh_core::doctor::{doctor_report, doctor_report_with_options};
+use workmesh_core::fix::{backfill_missing_uids, fix_dependencies, fix_task_filenames, FixerKind};
+use workmesh_core::focus::load_focus;
+use workmesh_core::gantt::{
+    plantuml_gantt, render_plantuml_svg, write_text_file, PlantumlRenderError,
+};
+use workmesh_core::global_sessions::{
+    append_session_saved, load_sessions_latest_fast, new_session_id, now_rfc3339,
+    read_current_session_id, rebuild_sessions_index, refresh_sessions_index, resolve_workmesh_home,
+    set_current_session, verify_sessions_index, AgentSession, CheckpointRef, GitSnapshot,
+    WorktreeBinding,
+};
+use workmesh_core::id_fix::{fix_duplicate_task_ids, FixIdsOptions};
+use workmesh_core::index::{rebuild_index, refresh_index, verify_index};
+use workmesh_core::initiative::{
+    best_effort_git_branch as core_git_branch, ensure_branch_initiative, next_namespaced_task_id,
+};
+use workmesh_core::migration::{migrate_backlog, MigrationError};
+use workmesh_core::migration_audit::{
+    apply_migration_plan, audit_deprecations, plan_migrations, MigrationApplyOptions,
+    MigrationPlanOptions,
+};
+use workmesh_core::project::{ensure_project_docs, repo_root_from_backlog};
+use workmesh_core::quickstart::{quickstart, QuickstartOptions};
+use workmesh_core::rekey::{
+    parse_rekey_request, rekey_apply, render_rekey_prompt, RekeyApplyOptions, RekeyPromptOptions,
+};
+use workmesh_core::session::{
+    append_session_journal, diff_since_checkpoint, render_diff, render_resume, resolve_project_id,
+    resume_summary, task_summary, write_checkpoint, write_working_set, CheckpointOptions,
+};
+use workmesh_core::skills::{
+    detect_user_agents, embedded_skill_ids, install_embedded_skill_global_auto_report,
+    install_embedded_skill_report, load_skill_content, uninstall_embedded_skill_global_auto_report,
+    uninstall_embedded_skill_report, SkillAgent, SkillInstallReport, SkillScope,
+    SkillUninstallReport,
+};
+use workmesh_core::task::{load_tasks, load_tasks_with_archive, tasks_dir_for_root, Lease, Task};
+use workmesh_core::task_ops::{
+    append_note, create_task_file_with_sections, ensure_can_set_status_with_rules, filter_tasks,
+    graph_export, inferred_parent_for_discovered, is_lease_active, now_timestamp,
+    ready_tasks_with_rules, recommend_next_tasks_with_context_and_rules, render_task_line,
+    render_task_line_with_ancestry, replace_section, set_list_field, sort_tasks, status_counts,
+    task_to_json_value, task_to_json_value_with_context, tasks_to_json, tasks_to_jsonl,
+    timestamp_plus_minutes, update_body, update_lease_fields, update_relationship_field,
+    update_task_field, update_task_field_or_section, validate_task_creation_with_rules,
+    validate_tasks_with_rules, FieldValue, TaskSectionContent,
+};
+use workmesh_core::truth::{
+    accept_truth, apply_truth_migration, list_truths, propose_truth, reject_truth, show_truth,
+    supersede_truth, truth_migration_audit, truth_migration_plan, validate_truth_store,
+    TruthContext as CoreTruthContext, TruthProposeInput, TruthQuery, TruthState,
+    TruthSupersedeInput, TruthTransitionInput,
+};
+use workmesh_core::views::{
+    blockers_report_with_context, board_lanes, scope_ids_from_context, BoardBy,
+};
+use workmesh_core::workstreams::{
+    build_workstream_restore_plan, derive_unique_workstream_key,
+    find_workstream_for_repo_by_worktree_path, list_workstreams_for_repo,
+    resolve_repo_root_for_registry, update_workstream_for_repo_by_id, upsert_workstream_record,
+    WorkstreamContextSnapshot, WorkstreamRecord, WorkstreamRestoreOptions, WorkstreamStatus,
+};
+use workmesh_core::worktrees::{
+    create_git_worktree, current_branch as current_worktree_branch, default_worktrees_dir,
+    derive_unique_worktree_branch, doctor_worktrees, find_worktree_record_by_path, git_has_head,
+    list_worktree_views, set_worktree_attached_session_id, upsert_worktree_record, WorktreeRecord,
+};
+use workmesh_render::dispatch_tool as render_dispatch_tool;
+use workmesh_tools::{
+    build_tool_info_payload, placeholder_tool_definition, render_tool_info_text,
+    resolve_cli_repo_root,
+};
+
+#[derive(Parser)]
+#[command(name = "workmesh", version = version::FULL, about = "WorkMesh CLI (WIP)")]
+struct Cli {
+    /// Path to repo root or backlog directory
+    #[arg(long, required = true)]
+    root: PathBuf,
+    /// Automatically write a checkpoint after mutating commands
+    #[arg(long, action = ArgAction::SetTrue, global = true)]
+    auto_checkpoint: bool,
+    /// Automatically update the global agent session (requires an active session pointer)
+    #[arg(long, action = ArgAction::SetTrue, global = true)]
+    auto_session_save: bool,
+    /// Disable automatic global session updates for this command invocation
+    #[arg(
+        long,
+        action = ArgAction::SetTrue,
+        global = true,
+        conflicts_with = "auto_session_save"
+    )]
+    no_auto_session_save: bool,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    /// Return README.json (agent-friendly repo docs)
+    Readme {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Show MCP tool metadata for a WorkMesh command/tool
+    ToolInfo {
+        name: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Return skill content (defaults to workmesh)
+    SkillContent {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Return the project-management skill content (defaults to workmesh)
+    ProjectManagementSkill {
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Diagnostics for repo layout, context, index, and skill installation
+    Doctor {
+        #[arg(long, action = ArgAction::SetTrue)]
+        fix_storage: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Manage WorkMesh configuration (project `.workmesh.toml` and global `~/.workmesh/config.toml`)
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Install bundled WorkMesh skill packs (convenience command)
+    Install {
+        /// Install skill packs into agent skill directories
+        #[arg(long, action = ArgAction::SetTrue)]
+        skills: bool,
+        /// Skill profile to install
+        #[arg(long, value_enum, default_value_t = SkillProfileArg::All)]
+        profile: SkillProfileArg,
+        /// Install scope: project (default) or user
+        #[arg(long, value_enum, default_value_t = SkillScopeArg::Project)]
+        scope: SkillScopeArg,
+        /// Which agent(s) to install for
+        #[arg(long, value_enum, default_value_t = SkillAgentArg::All)]
+        agent: SkillAgentArg,
+        /// Overwrite existing SKILL.md files
+        #[arg(long, action = ArgAction::SetTrue)]
+        force: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Uninstall bundled WorkMesh skill packs (convenience command)
+    Uninstall {
+        /// Uninstall skill packs from agent skill directories
+        #[arg(long, action = ArgAction::SetTrue)]
+        skills: bool,
+        /// Skill profile to uninstall
+        #[arg(long, value_enum, default_value_t = SkillProfileArg::All)]
+        profile: SkillProfileArg,
+        /// Uninstall scope: project (default) or user
+        #[arg(long, value_enum, default_value_t = SkillScopeArg::Project)]
+        scope: SkillScopeArg,
+        /// Which agent(s) to uninstall for
+        #[arg(long, value_enum, default_value_t = SkillAgentArg::All)]
+        agent: SkillAgentArg,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Show a simple board view (swimlanes) grouped by status/phase/priority
+    Board {
+        /// Include archived tasks under `workmesh/archive/` (recursively)
+        #[arg(long, action = ArgAction::SetTrue)]
+        all: bool,
+        /// Group lanes by this field
+        #[arg(long, value_enum, default_value_t = BoardByArg::Status)]
+        by: BoardByArg,
+        /// Scope to the current context (epic subtree or working set)
+        #[arg(long, action = ArgAction::SetTrue)]
+        focus: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Show blocked work and the top blockers (scoped to context epic by default)
+    Blockers {
+        /// Include archived tasks under `workmesh/archive/` (recursively)
+        #[arg(long, action = ArgAction::SetTrue)]
+        all: bool,
+        /// Override context epic id for scoping
+        #[arg(long)]
+        epic_id: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// List tasks
+    List {
+        /// Include archived tasks under `workmesh/archive/` (recursively)
+        #[arg(long, action = ArgAction::SetTrue)]
+        all: bool,
+        #[arg(long, action = ArgAction::Append)]
+        status: Vec<String>,
+        #[arg(long, action = ArgAction::Append)]
+        kind: Vec<String>,
+        #[arg(long, action = ArgAction::Append)]
+        phase: Vec<String>,
+        #[arg(long, action = ArgAction::Append)]
+        priority: Vec<String>,
+        #[arg(long, action = ArgAction::Append, value_name = "label")]
+        label: Vec<String>,
+        #[arg(long, value_name = "task-id")]
+        depends_on: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        deps_satisfied: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        blocked: bool,
+        #[arg(long)]
+        search: Option<String>,
+        #[arg(long, value_enum, default_value_t = SortKey::Id)]
+        sort: SortKey,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Show next available task
+    Next {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Show the next recommended task candidates
+    NextTasks {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// List ready tasks
+    Ready {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Show a task
+    Show {
+        task_id: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        full: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Show task stats
+    Stats {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Run fixers to detect/repair common task data issues
+    Fix {
+        #[command(subcommand)]
+        command: FixCommand,
+    },
+    /// Generate an agent prompt to propose a task-id rekey mapping (and reference rewrites).
+    RekeyPrompt {
+        /// Include archived tasks under `workmesh/archive/` (recursively)
+        #[arg(long, action = ArgAction::SetTrue)]
+        all: bool,
+        /// Include task bodies in the prompt data (can be large)
+        #[arg(long, action = ArgAction::SetTrue)]
+        include_body: bool,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Apply a task-id rekey mapping and rewrite structured references (dependencies + relationships).
+    RekeyApply {
+        /// Path to mapping JSON (if omitted, reads stdin)
+        #[arg(long)]
+        mapping: Option<PathBuf>,
+        /// Apply changes (otherwise dry-run)
+        #[arg(long, action = ArgAction::SetTrue)]
+        apply: bool,
+        /// Include archived tasks under `workmesh/archive/` (recursively)
+        #[arg(long, action = ArgAction::SetTrue)]
+        all: bool,
+        /// Strict mode: only rewrites structured fields (id + dependencies + relationships), no task body edits.
+        #[arg(long, action = ArgAction::SetTrue)]
+        strict: bool,
+        /// Non-strict mode (default): also rewrites free-text mentions of task IDs in task bodies.
+        #[arg(long, action = ArgAction::SetTrue)]
+        non_strict: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Export task graph as JSON
+    GraphExport {
+        #[arg(long, action = ArgAction::SetTrue)]
+        pretty: bool,
+    },
+    /// Export tasks as JSON
+    Export {
+        #[arg(long, action = ArgAction::SetTrue)]
+        pretty: bool,
+    },
+    /// Export tasks as JSONL
+    IssuesExport {
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        include_body: bool,
+    },
+    /// Rebuild JSONL task index
+    IndexRebuild {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Refresh JSONL task index
+    IndexRefresh {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Verify JSONL task index
+    IndexVerify {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Write a session checkpoint (JSON + Markdown)
+    Checkpoint {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        audit_limit: Option<usize>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Resume from the latest checkpoint
+    Resume {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Write the working set file
+    WorkingSet {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        tasks: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Append a session journal entry
+    SessionJournal {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long)]
+        next: Option<String>,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Global agent sessions (cross-repo continuity)
+    Session {
+        #[command(subcommand)]
+        command: SessionCommand,
+    },
+    /// Feature-level truth ledger (decisions/constraints/contracts)
+    Truth {
+        #[command(subcommand)]
+        command: TruthCommand,
+    },
+    /// Workstream orchestration for parallel feature streams
+    Workstream {
+        #[command(subcommand)]
+        command: WorkstreamCommand,
+    },
+    /// Git worktree runtime orchestration for parallel agent workflows
+    Worktree {
+        #[command(subcommand)]
+        command: WorktreeCommand,
+    },
+    /// Repo-local context (project/objective/scope)
+    Context {
+        #[command(subcommand)]
+        command: ContextCommand,
+    },
+    /// Manage agent skills (show/install/uninstall)
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommand,
+    },
+    /// Show changes since a checkpoint
+    CheckpointDiff {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Set task status
+    SetStatus {
+        task_id: String,
+        status: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+    },
+    /// Claim a task (lease)
+    Claim {
+        task_id: String,
+        owner: String,
+        #[arg(long)]
+        minutes: Option<i64>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+    },
+    /// Release a task lease
+    Release {
+        task_id: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+    },
+    /// Bulk operations (alias group)
+    Bulk {
+        #[command(subcommand)]
+        command: BulkCommand,
+    },
+    /// Bulk set status for tasks
+    BulkSetStatus {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        status: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Bulk set a front matter field for tasks
+    BulkSetField {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        field: String,
+        #[arg(long)]
+        value: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Bulk add label to tasks
+    BulkLabelAdd {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        label: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Bulk remove label from tasks
+    BulkLabelRemove {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        label: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Bulk add dependency to tasks
+    BulkDepAdd {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        dependency: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Bulk remove dependency from tasks
+    BulkDepRemove {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        dependency: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Bulk append a note to tasks
+    BulkNote {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        note: String,
+        #[arg(long, value_enum, default_value_t = NoteSection::Notes)]
+        section: NoteSection,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Set a front matter field
+    SetField {
+        task_id: String,
+        field: String,
+        value: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+    },
+    /// Add label to task
+    LabelAdd {
+        task_id: String,
+        label: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+    },
+    /// Remove label from task
+    LabelRemove {
+        task_id: String,
+        label: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+    },
+    /// Add dependency to task
+    DepAdd {
+        task_id: String,
+        dependency: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+    },
+    /// Remove dependency from task
+    DepRemove {
+        task_id: String,
+        dependency: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+    },
+    /// Append a note to a task
+    Note {
+        task_id: String,
+        note: String,
+        #[arg(long, value_enum, default_value_t = NoteSection::Notes)]
+        section: NoteSection,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+    },
+    /// Replace task body (all content after front matter)
+    SetBody {
+        task_id: String,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+    },
+    /// Replace a named section in the task body
+    SetSection {
+        task_id: String,
+        section: String,
+        #[arg(long)]
+        text: Option<String>,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+    },
+    /// Create a new task
+    Add {
+        #[arg(long, value_name = "task-id")]
+        id: Option<String>,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        acceptance_criteria: Option<String>,
+        #[arg(long)]
+        definition_of_done: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        draft: bool,
+        #[arg(long, default_value = "To Do")]
+        status: String,
+        #[arg(long, default_value = "P2")]
+        priority: String,
+        #[arg(long, default_value = "Phase1")]
+        phase: String,
+        #[arg(long, default_value = "")]
+        labels: String,
+        #[arg(long, default_value = "")]
+        dependencies: String,
+        #[arg(long, default_value = "")]
+        assignee: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Create a task discovered from another task
+    AddDiscovered {
+        #[arg(long)]
+        from: String,
+        #[arg(long, value_name = "task-id")]
+        id: Option<String>,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        acceptance_criteria: Option<String>,
+        #[arg(long)]
+        definition_of_done: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        draft: bool,
+        #[arg(long, default_value = "To Do")]
+        status: String,
+        #[arg(long, default_value = "P2")]
+        priority: String,
+        #[arg(long, default_value = "Phase1")]
+        phase: String,
+        #[arg(long, default_value = "")]
+        labels: String,
+        #[arg(long, default_value = "")]
+        dependencies: String,
+        #[arg(long, default_value = "")]
+        assignee: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Create project docs scaffold
+    ProjectInit {
+        project_id: String,
+        #[arg(long)]
+        name: Option<String>,
+    },
+    /// Bootstrap WorkMesh by auto-detecting repo state and applying setup/migration
+    Bootstrap {
+        /// Project id to use when initializing a new repo or seeding missing context
+        #[arg(long)]
+        project_id: Option<String>,
+        /// Feature phrase for seed task initiative naming
+        #[arg(long)]
+        feature: Option<String>,
+        /// Objective to set when context is missing
+        #[arg(long)]
+        objective: Option<String>,
+        /// Repo-relative or absolute path for task files when initializing a new repo
+        #[arg(long)]
+        tasks_root: Option<String>,
+        /// Repo-relative or absolute path for repo-local WorkMesh state when initializing a new repo
+        #[arg(long)]
+        state_root: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Quickstart: scaffold docs + backlog + seed task
+    Quickstart {
+        project_id: String,
+        #[arg(long)]
+        name: Option<String>,
+        /// Feature/project phrase used to seed initiative acronym for the first task id
+        #[arg(long)]
+        feature: Option<String>,
+        /// Repo-relative or absolute path for task files
+        #[arg(long)]
+        tasks_root: Option<String>,
+        /// Repo-relative or absolute path for repo-local WorkMesh state
+        #[arg(long)]
+        state_root: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        agents_snippet: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Migrate legacy/deprecated structures (audit -> plan -> apply)
+    Migrate {
+        #[command(subcommand)]
+        command: Option<MigrateCommand>,
+        /// Legacy migration target (compat mode when no subcommand is provided)
+        #[arg(long)]
+        to: Option<String>,
+        /// Legacy non-interactive confirm (compat mode when no subcommand is provided)
+        #[arg(long, action = ArgAction::SetTrue)]
+        yes: bool,
+    },
+    /// Archive terminal tasks under archive/<yyyy>/<mm>/<status>/<relative-task-path> (defaults: Done, Cancelled, Canceled, Won't Do, Wont Do)
+    Archive {
+        /// Explicit task id(s) to archive. Repeat or comma-separate for multiple values.
+        /// Explicit ids bypass status and before filters.
+        #[arg(long = "task-id", action = ArgAction::Append)]
+        task_id: Vec<String>,
+        /// Explicit task id(s) to archive.
+        #[arg(value_name = "TASK_ID")]
+        task_ids: Vec<String>,
+        #[arg(long, default_value = "30d")]
+        before: String,
+        /// Status filter(s). Repeat or comma-separate for multiple values.
+        /// When omitted, defaults to terminal statuses: Done, Cancelled, Canceled, Won't Do, Wont Do.
+        #[arg(long, action = ArgAction::Append)]
+        status: Vec<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Validate task files
+    Validate {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Render structured data using the native WorkMesh renderers
+    Render {
+        #[command(subcommand)]
+        command: RenderCommand,
+    },
+    /// Show backlog best practices
+    BestPractices,
+    /// Render PlantUML gantt text
+    Gantt {
+        #[arg(long)]
+        start: Option<String>,
+        #[arg(long, default_value_t = 3)]
+        zoom: i32,
+    },
+    /// Write PlantUML gantt to a file
+    GanttFile {
+        #[arg(long)]
+        start: Option<String>,
+        #[arg(long, default_value_t = 3)]
+        zoom: i32,
+        #[arg(long)]
+        output: PathBuf,
+    },
+    /// Render gantt SVG via PlantUML
+    GanttSvg {
+        #[arg(long)]
+        start: Option<String>,
+        #[arg(long, default_value_t = 3)]
+        zoom: i32,
+        #[arg(long)]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        plantuml_cmd: Option<String>,
+        #[arg(long)]
+        plantuml_jar: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum SkillCommand {
+    /// Show a skill's SKILL.md content (reads repo skill dirs, falls back to embedded default)
+    Show {
+        /// Skill name (defaults to workmesh)
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Install the embedded WorkMesh skill into agent skill directories
+    Install {
+        /// Skill name (defaults to workmesh)
+        #[arg(long)]
+        name: Option<String>,
+        /// Install to user-level (~/.codex/skills, ~/.claude/skills, ~/.cursor/skills) or
+        /// project-level (<repo>/.agents/skills for Codex/Cursor, <repo>/.claude/skills for
+        /// Claude)
+        #[arg(long, value_enum, default_value_t = SkillScopeArg::User)]
+        scope: SkillScopeArg,
+        /// Which agent(s) to install for
+        #[arg(long, value_enum, default_value_t = SkillAgentArg::All)]
+        agent: SkillAgentArg,
+        /// Overwrite existing SKILL.md files
+        #[arg(long, action = ArgAction::SetTrue)]
+        force: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Uninstall the embedded WorkMesh skill from agent skill directories
+    Uninstall {
+        /// Skill name (defaults to workmesh)
+        #[arg(long)]
+        name: Option<String>,
+        /// Uninstall from user-level (~/.codex/skills, ~/.claude/skills, ~/.cursor/skills) or
+        /// project-level (<repo>/.agents/skills for Codex/Cursor, <repo>/.claude/skills for
+        /// Claude)
+        #[arg(long, value_enum, default_value_t = SkillScopeArg::User)]
+        scope: SkillScopeArg,
+        /// Which agent(s) to uninstall for
+        #[arg(long, value_enum, default_value_t = SkillAgentArg::All)]
+        agent: SkillAgentArg,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Install the embedded skill globally for detected agents under your home directory
+    ///
+    /// This only installs for agents that already have a home folder (e.g. ~/.codex, ~/.claude, ~/.cursor).
+    InstallGlobal {
+        /// Skill name (defaults to workmesh)
+        #[arg(long)]
+        name: Option<String>,
+        /// Overwrite existing SKILL.md files
+        #[arg(long, action = ArgAction::SetTrue)]
+        force: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Uninstall the embedded skill globally for detected agents under your home directory
+    UninstallGlobal {
+        /// Skill name (defaults to workmesh)
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RenderCommand {
+    /// Render a table from array/object data
+    Table(RenderInputArgs),
+    /// Render a key/value view
+    Kv(RenderInputArgs),
+    /// Render compact stats
+    Stats(RenderInputArgs),
+    /// Render a list
+    List(RenderInputArgs),
+    /// Render progress output
+    Progress(RenderInputArgs),
+    /// Render a tree
+    Tree(RenderInputArgs),
+    /// Render a diff
+    Diff(RenderInputArgs),
+    /// Render logs
+    Logs(RenderInputArgs),
+    /// Render alerts
+    Alerts(RenderInputArgs),
+    /// Render a bar chart
+    ChartBar(RenderInputArgs),
+    /// Render a sparkline
+    Sparkline(RenderInputArgs),
+    /// Render a timeline
+    Timeline(RenderInputArgs),
+}
+
+#[derive(Args, Clone, Debug)]
+struct RenderInputArgs {
+    /// Inline data payload. If valid JSON, it is parsed as JSON; otherwise it is treated as a string.
+    #[arg(long, conflicts_with_all = ["data_file", "stdin"])]
+    data: Option<String>,
+    /// Read data payload from a file.
+    #[arg(long, value_name = "path", conflicts_with_all = ["data", "stdin"])]
+    data_file: Option<PathBuf>,
+    /// Read data payload from stdin.
+    #[arg(long, action = ArgAction::SetTrue, conflicts_with_all = ["data", "data_file"])]
+    stdin: bool,
+    /// Optional renderer format hint.
+    #[arg(long)]
+    format: Option<String>,
+    /// Inline configuration JSON for the renderer.
+    #[arg(long, conflicts_with = "config_file")]
+    configuration: Option<String>,
+    /// Read configuration JSON from a file.
+    #[arg(long, value_name = "path", conflicts_with = "configuration")]
+    config_file: Option<PathBuf>,
+}
+
+#[derive(Subcommand)]
+enum FixCommand {
+    /// List available fixers
+    List {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Run all fixers (optionally scoped by --only/--exclude)
+    All {
+        /// Apply changes (default is check/dry-run)
+        #[arg(long, action = ArgAction::SetTrue)]
+        apply: bool,
+        /// Explicitly run in check mode (default if --apply is not set)
+        #[arg(long, action = ArgAction::SetTrue)]
+        check: bool,
+        /// Comma-separated list of fixers to include (uid,deps,ids,filenames)
+        #[arg(long, value_delimiter = ',', value_enum)]
+        only: Vec<FixTargetArg>,
+        /// Comma-separated list of fixers to exclude (uid,deps,ids,filenames)
+        #[arg(long, value_delimiter = ',', value_enum)]
+        exclude: Vec<FixTargetArg>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Backfill missing task uid values
+    Uid {
+        /// Apply changes (default is check/dry-run)
+        #[arg(long, action = ArgAction::SetTrue)]
+        apply: bool,
+        /// Explicitly run in check mode (default if --apply is not set)
+        #[arg(long, action = ArgAction::SetTrue)]
+        check: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Remove missing/duplicate dependencies from task dependency lists
+    Deps {
+        /// Apply changes (default is check/dry-run)
+        #[arg(long, action = ArgAction::SetTrue)]
+        apply: bool,
+        /// Explicitly run in check mode (default if --apply is not set)
+        #[arg(long, action = ArgAction::SetTrue)]
+        check: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Detect/rekey duplicate task ids
+    Ids {
+        /// Apply changes (default is check/dry-run)
+        #[arg(long, action = ArgAction::SetTrue)]
+        apply: bool,
+        /// Explicitly run in check mode (default if --apply is not set)
+        #[arg(long, action = ArgAction::SetTrue)]
+        check: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Normalize task filenames from task id/title/uid metadata
+    Filenames {
+        /// Apply changes (default is check/dry-run)
+        #[arg(long, action = ArgAction::SetTrue)]
+        apply: bool,
+        /// Explicitly run in check mode (default if --apply is not set)
+        #[arg(long, action = ArgAction::SetTrue)]
+        check: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum, PartialEq, Eq, Hash)]
+enum FixTargetArg {
+    Uid,
+    Deps,
+    Ids,
+    Filenames,
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
+enum SkillScopeArg {
+    User,
+    Project,
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
+enum SkillAgentArg {
+    Codex,
+    Claude,
+    Cursor,
+    All,
+}
+
+#[derive(Debug, Copy, Clone, ValueEnum)]
+enum SkillProfileArg {
+    /// Hybrid router skill (auto-select CLI or MCP mode)
+    Hybrid,
+    /// CLI-only profile
+    Cli,
+    /// MCP-only profile
+    Mcp,
+    /// Install all profiles (hybrid + cli + mcp)
+    All,
+}
+
+impl From<SkillScopeArg> for SkillScope {
+    fn from(value: SkillScopeArg) -> Self {
+        match value {
+            SkillScopeArg::User => SkillScope::User,
+            SkillScopeArg::Project => SkillScope::Project,
+        }
+    }
+}
+
+fn skill_names_for_profile(profile: SkillProfileArg) -> Vec<&'static str> {
+    match profile {
+        SkillProfileArg::Hybrid => vec!["workmesh"],
+        SkillProfileArg::Cli => vec!["workmesh-cli"],
+        SkillProfileArg::Mcp => vec!["workmesh-mcp"],
+        SkillProfileArg::All => embedded_skill_ids(),
+    }
+}
+
+fn merge_install_report(report: &mut SkillInstallReport, partial: SkillInstallReport) {
+    report.written.extend(partial.written);
+    report.skipped.extend(partial.skipped);
+}
+
+fn merge_uninstall_report(report: &mut SkillUninstallReport, partial: SkillUninstallReport) {
+    report.removed.extend(partial.removed);
+    report.missing.extend(partial.missing);
+}
+
+fn print_install_report(report: SkillInstallReport) {
+    if report.written.is_empty() {
+        println!("(no files written)");
+    } else {
+        for path in report.written {
+            println!("{}", path.display());
+        }
+    }
+    if !report.skipped.is_empty() {
+        println!("(skipped existing; use --force to overwrite)");
+        for path in report.skipped {
+            println!("{}", path.display());
+        }
+    }
+}
+
+fn print_uninstall_report(report: SkillUninstallReport) {
+    if report.removed.is_empty() {
+        println!("(no files removed)");
+    } else {
+        for path in report.removed {
+            println!("{}", path.display());
+        }
+    }
+    if !report.missing.is_empty() {
+        println!("(not found)");
+        for path in report.missing {
+            println!("{}", path.display());
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FixRunReport {
+    fixer: String,
+    detected: usize,
+    fixed: usize,
+    skipped: usize,
+    warnings: Vec<String>,
+    details: serde_json::Value,
+}
+
+fn fix_run_to_json(run: &FixRunReport) -> serde_json::Value {
+    serde_json::json!({
+        "fixer": run.fixer,
+        "detected": run.detected,
+        "fixed": run.fixed,
+        "skipped": run.skipped,
+        "warnings": run.warnings,
+        "details": run.details,
+    })
+}
+
+fn parse_fix_mode(apply: bool, check: bool) -> Result<bool> {
+    if apply && check {
+        die("choose either --apply or --check (or neither for default dry-run)");
+    }
+    Ok(apply)
+}
+
+fn all_fix_targets() -> Vec<FixTargetArg> {
+    vec![
+        FixTargetArg::Uid,
+        FixTargetArg::Deps,
+        FixTargetArg::Ids,
+        FixTargetArg::Filenames,
+    ]
+}
+
+fn select_fix_targets(only: &[FixTargetArg], exclude: &[FixTargetArg]) -> Vec<FixTargetArg> {
+    let mut selected = if only.is_empty() {
+        all_fix_targets()
+    } else {
+        only.to_vec()
+    };
+    if !exclude.is_empty() {
+        let exclude_set: HashSet<FixTargetArg> = exclude.iter().copied().collect();
+        selected.retain(|item| !exclude_set.contains(item));
+    }
+    let mut seen = HashSet::new();
+    selected.retain(|item| seen.insert(*item));
+    selected
+}
+
+fn as_fixer_kind(target: FixTargetArg) -> FixerKind {
+    match target {
+        FixTargetArg::Uid => FixerKind::Uid,
+        FixTargetArg::Deps => FixerKind::Deps,
+        FixTargetArg::Ids => FixerKind::Ids,
+        FixTargetArg::Filenames => FixerKind::Filenames,
+    }
+}
+
+fn print_fix_report(report: &FixRunReport, apply: bool) {
+    println!(
+        "{} | detected={} {}={} skipped={}",
+        report.fixer,
+        report.detected,
+        if apply { "fixed" } else { "would_fix" },
+        if apply {
+            report.fixed
+        } else {
+            report.detected.saturating_sub(report.skipped)
+        },
+        report.skipped
+    );
+    for warning in &report.warnings {
+        println!("  warning: {}", warning);
+    }
+}
+
+fn rewrite_cli_args(args: Vec<OsString>) -> Vec<OsString> {
+    if args.len() <= 1 {
+        return args;
+    }
+
+    let mut rewritten = Vec::with_capacity(args.len() + 2);
+    rewritten.push(args[0].clone());
+
+    let mut command_seen = false;
+    let mut skip_next_value = false;
+
+    for arg in args.into_iter().skip(1) {
+        if command_seen {
+            rewritten.push(arg);
+            continue;
+        }
+
+        let value = arg.to_string_lossy().to_string();
+        if skip_next_value {
+            rewritten.push(arg);
+            skip_next_value = false;
+            continue;
+        }
+
+        if value == "--root" {
+            rewritten.push(arg);
+            skip_next_value = true;
+            continue;
+        }
+
+        if value.starts_with('-') {
+            rewritten.push(arg);
+            continue;
+        }
+
+        command_seen = true;
+        let normalized = value.replace('_', "-");
+        let alias = command_alias(&normalized).unwrap_or_else(|| vec![normalized]);
+        rewritten.extend(alias.into_iter().map(OsString::from));
+    }
+
+    rewritten
+}
+
+fn command_alias(command: &str) -> Option<Vec<String>> {
+    let alias = match command {
+        "help" => vec!["--help"],
+        "version" => vec!["--version"],
+        "readme" => vec!["readme"],
+        "tool-info" => vec!["tool-info"],
+        "skill-content" => vec!["skill-content"],
+        "project-management-skill" => vec!["project-management-skill"],
+        "config-show" => vec!["config", "show"],
+        "config-set" => vec!["config", "set"],
+        "config-unset" => vec!["config", "unset"],
+        "context-show" => vec!["context", "show"],
+        "context-set" => vec!["context", "set"],
+        "context-clear" => vec!["context", "clear"],
+        "workstream-list" => vec!["workstream", "list"],
+        "workstream-create" => vec!["workstream", "create"],
+        "workstream-show" => vec!["workstream", "show"],
+        "workstream-switch" => vec!["workstream", "switch"],
+        "workstream-pause" => vec!["workstream", "pause"],
+        "workstream-close" => vec!["workstream", "close"],
+        "workstream-reopen" => vec!["workstream", "reopen"],
+        "workstream-rename" => vec!["workstream", "rename"],
+        "workstream-set" => vec!["workstream", "set"],
+        "workstream-doctor" => vec!["workstream", "doctor"],
+        "workstream-restore" => vec!["workstream", "restore"],
+        "worktree-list" => vec!["worktree", "list"],
+        "worktree-create" => vec!["worktree", "create"],
+        "worktree-adopt-clone" => vec!["worktree", "adopt-clone"],
+        "worktree-attach" => vec!["worktree", "attach"],
+        "worktree-detach" => vec!["worktree", "detach"],
+        "worktree-doctor" => vec!["worktree", "doctor"],
+        "truth-propose" => vec!["truth", "propose"],
+        "truth-accept" => vec!["truth", "accept"],
+        "truth-reject" => vec!["truth", "reject"],
+        "truth-supersede" => vec!["truth", "supersede"],
+        "truth-show" => vec!["truth", "show"],
+        "truth-list" => vec!["truth", "list"],
+        "truth-validate" => vec!["truth", "validate"],
+        "truth-migrate-audit" => vec!["truth", "migrate", "audit"],
+        "truth-migrate-plan" => vec!["truth", "migrate", "plan"],
+        "truth-migrate-apply" => vec!["truth", "migrate", "apply"],
+        "session-save" => vec!["session", "save"],
+        "session-list" => vec!["session", "list"],
+        "session-show" => vec!["session", "show"],
+        "session-resume" => vec!["session", "resume"],
+        "session-index-rebuild" => vec!["session", "index-rebuild"],
+        "session-index-refresh" => vec!["session", "index-refresh"],
+        "session-index-verify" => vec!["session", "index-verify"],
+        "list-tasks" => vec!["list"],
+        "show-task" => vec!["show"],
+        "next-task" => vec!["next"],
+        "next-tasks" => vec!["next-tasks"],
+        "ready-tasks" => vec!["ready"],
+        "export-tasks" => vec!["export"],
+        "archive-tasks" => vec!["archive"],
+        "claim-task" => vec!["claim"],
+        "release-task" => vec!["release"],
+        "add-label" => vec!["label-add"],
+        "remove-label" => vec!["label-remove"],
+        "add-dependency" => vec!["dep-add"],
+        "remove-dependency" => vec!["dep-remove"],
+        "add-note" => vec!["note"],
+        "add-task" => vec!["add"],
+        "set-status" => vec!["set-status"],
+        "set-field" => vec!["set-field"],
+        "set-body" => vec!["set-body"],
+        "set-section" => vec!["set-section"],
+        "add-discovered" => vec!["add-discovered"],
+        "working-set" => vec!["working-set"],
+        "session-journal" => vec!["session-journal"],
+        "checkpoint-diff" => vec!["checkpoint-diff"],
+        "graph-export" => vec!["graph-export"],
+        "issues-export" => vec!["issues-export"],
+        "index-rebuild" => vec!["index-rebuild"],
+        "index-refresh" => vec!["index-refresh"],
+        "index-verify" => vec!["index-verify"],
+        "project-init" => vec!["project-init"],
+        "migrate-audit" => vec!["migrate", "audit"],
+        "migrate-plan" => vec!["migrate", "plan"],
+        "migrate-apply" => vec!["migrate", "apply"],
+        "migrate-backlog" => vec!["migrate"],
+        "best-practices" => vec!["best-practices"],
+        "gantt-text" => vec!["gantt"],
+        "gantt-file" => vec!["gantt-file"],
+        "gantt-svg" => vec!["gantt-svg"],
+        "skill-show" => vec!["skill", "show"],
+        "skill-install" => vec!["skill", "install"],
+        "skill-uninstall" => vec!["skill", "uninstall"],
+        "skill-install-global" => vec!["skill", "install-global"],
+        "skill-uninstall-global" => vec!["skill", "uninstall-global"],
+        "bulk-set-status" => vec!["bulk-set-status"],
+        "bulk-set-field" => vec!["bulk-set-field"],
+        "bulk-add-label" => vec!["bulk-label-add"],
+        "bulk-remove-label" => vec!["bulk-label-remove"],
+        "bulk-add-dependency" => vec!["bulk-dep-add"],
+        "bulk-remove-dependency" => vec!["bulk-dep-remove"],
+        "bulk-add-note" => vec!["bulk-note"],
+        "fix-ids" => vec!["fix", "ids"],
+        "fix-filenames" => vec!["fix", "filenames"],
+        "render-table" => vec!["render", "table"],
+        "render-kv" => vec!["render", "kv"],
+        "render-stats" => vec!["render", "stats"],
+        "render-list" => vec!["render", "list"],
+        "render-progress" => vec!["render", "progress"],
+        "render-tree" => vec!["render", "tree"],
+        "render-diff" => vec!["render", "diff"],
+        "render-logs" => vec!["render", "logs"],
+        "render-alerts" => vec!["render", "alerts"],
+        "render-chart-bar" => vec!["render", "chart-bar"],
+        "render-sparkline" => vec!["render", "sparkline"],
+        "render-timeline" => vec!["render", "timeline"],
+        _ => return None,
+    };
+    Some(alias.into_iter().map(|value| value.to_string()).collect())
+}
+
+fn run_fix_target(backlog_dir: &Path, target: FixTargetArg, apply: bool) -> Result<FixRunReport> {
+    let tasks = load_tasks(backlog_dir);
+    match target {
+        FixTargetArg::Uid => {
+            let report = backfill_missing_uids(&tasks, apply)?;
+            Ok(FixRunReport {
+                fixer: FixerKind::Uid.as_str().to_string(),
+                detected: report.detected,
+                fixed: report.fixed,
+                skipped: report.skipped,
+                warnings: report.warnings,
+                details: serde_json::json!(report.changes),
+            })
+        }
+        FixTargetArg::Deps => {
+            let report = fix_dependencies(&tasks, apply)?;
+            Ok(FixRunReport {
+                fixer: FixerKind::Deps.as_str().to_string(),
+                detected: report.detected,
+                fixed: report.fixed,
+                skipped: report.skipped,
+                warnings: report.warnings,
+                details: serde_json::json!(report.changes),
+            })
+        }
+        FixTargetArg::Ids => {
+            let report = fix_duplicate_task_ids(backlog_dir, &tasks, FixIdsOptions { apply })?;
+            Ok(FixRunReport {
+                fixer: FixerKind::Ids.as_str().to_string(),
+                detected: report.changes.len(),
+                fixed: if apply { report.changes.len() } else { 0 },
+                skipped: 0,
+                warnings: report.warnings,
+                details: serde_json::json!(report
+                    .changes
+                    .iter()
+                    .map(|change| serde_json::json!({
+                        "old_id": change.old_id,
+                        "new_id": change.new_id,
+                        "old_path": change.old_path,
+                        "new_path": change.new_path,
+                        "uid": change.uid,
+                    }))
+                    .collect::<Vec<_>>()),
+            })
+        }
+        FixTargetArg::Filenames => {
+            let report = fix_task_filenames(&tasks, apply)?;
+            Ok(FixRunReport {
+                fixer: FixerKind::Filenames.as_str().to_string(),
+                detected: report.detected,
+                fixed: report.fixed,
+                skipped: report.skipped,
+                warnings: report.warnings,
+                details: serde_json::json!(report.changes),
+            })
+        }
+    }
+}
+
+impl From<SkillAgentArg> for SkillAgent {
+    fn from(value: SkillAgentArg) -> Self {
+        match value {
+            SkillAgentArg::Codex => SkillAgent::Codex,
+            SkillAgentArg::Claude => SkillAgent::Claude,
+            SkillAgentArg::Cursor => SkillAgent::Cursor,
+            SkillAgentArg::All => SkillAgent::All,
+        }
+    }
+}
+
+#[derive(Subcommand)]
+enum ContextCommand {
+    /// Set context state for the current repo
+    Set {
+        #[arg(long)]
+        project: Option<String>,
+        /// Scope to an epic subtree
+        #[arg(long)]
+        epic: Option<String>,
+        #[arg(long)]
+        objective: Option<String>,
+        /// Comma-separated task ids
+        #[arg(long)]
+        tasks: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Show the current context state
+    Show {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Clear the current context state
+    Clear {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorkstreamCommand {
+    /// List known workstreams for this repo
+    List {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Build a deterministic restore plan for active workstreams (after reboot / lost terminals)
+    Restore {
+        /// Include paused/closed workstreams (default: active only)
+        #[arg(long, action = ArgAction::SetTrue)]
+        all: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Create a new workstream (optionally create a new worktree)
+    Create {
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        key: Option<String>,
+        /// Optional worktree path (requires --branch)
+        #[arg(long)]
+        path: Option<PathBuf>,
+        /// Optional worktree branch (requires --path)
+        #[arg(long)]
+        branch: Option<String>,
+        /// When set, treat --path as an existing worktree checkout (do not run `git worktree add`).
+        #[arg(long, action = ArgAction::SetTrue)]
+        existing: bool,
+        /// Optional starting point (branch/commit/tag) when provisioning a worktree
+        #[arg(long)]
+        from: Option<String>,
+        /// Optional context seed project id
+        #[arg(long)]
+        project: Option<String>,
+        /// Optional context seed epic id
+        #[arg(long)]
+        epic: Option<String>,
+        /// Optional context seed objective
+        #[arg(long)]
+        objective: Option<String>,
+        /// Optional context seed task list (CSV)
+        #[arg(long)]
+        tasks: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Show one workstream (defaults to active stream in this worktree)
+    Show {
+        id: Option<String>,
+        /// Include accepted truth records linked to this workstream
+        #[arg(long, action = ArgAction::SetTrue)]
+        truth: bool,
+        /// Include a restore view (resume_script, next_task, issues) for this workstream
+        #[arg(long, action = ArgAction::SetTrue)]
+        restore: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Pause a workstream (intentionally inactive)
+    Pause {
+        /// Workstream id or key (defaults to active workstream)
+        id: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Close a workstream (completed or abandoned)
+    Close {
+        /// Workstream id or key (defaults to active workstream)
+        id: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Reopen a paused/closed workstream (marks it active)
+    Reopen {
+        /// Workstream id or key (defaults to active workstream)
+        id: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Rename a workstream
+    Rename {
+        /// Workstream id or key (defaults to active workstream)
+        id: Option<String>,
+        #[arg(long)]
+        name: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Update workstream fields (key, notes, context snapshot)
+    Set {
+        /// Workstream id or key (defaults to active workstream)
+        id: Option<String>,
+        #[arg(long)]
+        key: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        epic: Option<String>,
+        #[arg(long)]
+        objective: Option<String>,
+        /// Optional task list (CSV) to set scope.mode=tasks (ignored if --epic is set)
+        #[arg(long)]
+        tasks: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Switch active workstream for this worktree
+    Switch {
+        id: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Diagnose workstream registry health for this repo
+    Doctor {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum WorktreeCommand {
+    /// List known worktrees (git + registry)
+    List {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Create a new git worktree and optionally seed context
+    Create {
+        #[arg(long)]
+        path: PathBuf,
+        #[arg(long)]
+        branch: String,
+        /// Optional starting point (branch/commit/tag)
+        #[arg(long)]
+        from: Option<String>,
+        /// Optional context seed project id
+        #[arg(long)]
+        project: Option<String>,
+        /// Optional context seed epic id
+        #[arg(long)]
+        epic: Option<String>,
+        /// Optional context seed objective
+        #[arg(long)]
+        objective: Option<String>,
+        /// Optional context seed task list (CSV)
+        #[arg(long)]
+        tasks: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Convert a standalone clone into a git worktree under this repo (backup + worktree add)
+    AdoptClone {
+        /// Path to the existing standalone clone directory
+        #[arg(long)]
+        from: PathBuf,
+        /// Target directory for the worktree (default: same as --from)
+        #[arg(long)]
+        to: Option<PathBuf>,
+        /// Target branch name for the new worktree (default: <source-branch>-adopt, deduped)
+        #[arg(long)]
+        branch: Option<String>,
+        /// Allow applying when the source clone has uncommitted changes
+        #[arg(long, action = ArgAction::SetTrue)]
+        allow_dirty: bool,
+        /// Apply the plan (default is dry-run / plan only)
+        #[arg(long, action = ArgAction::SetTrue)]
+        apply: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Attach the current (or specified) session to a worktree path
+    Attach {
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        path: Option<PathBuf>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Detach worktree metadata from the current (or specified) session
+    Detach {
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Diagnose stale/missing worktree records
+    Doctor {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+}
+
+#[derive(Copy, Clone, Debug, ValueEnum)]
+enum ConfigScopeArg {
+    Project,
+    Global,
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Show project/global config and effective defaults
+    Show {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Set a config key
+    Set {
+        #[arg(long, value_enum, default_value_t = ConfigScopeArg::Project)]
+        scope: ConfigScopeArg,
+        #[arg(long)]
+        key: String,
+        #[arg(long)]
+        value: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Unset a config key (remove it from the selected config file)
+    Unset {
+        #[arg(long, value_enum, default_value_t = ConfigScopeArg::Project)]
+        scope: ConfigScopeArg,
+        #[arg(long)]
+        key: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum MigrateCommand {
+    /// Detect legacy/deprecated structures and suggest migrations
+    Audit {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Build an ordered migration plan from audit findings
+    Plan {
+        #[arg(long, value_delimiter = ',', num_args = 0..)]
+        include: Vec<String>,
+        #[arg(long, value_delimiter = ',', num_args = 0..)]
+        exclude: Vec<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Apply migration plan (dry-run by default unless --apply is passed)
+    Apply {
+        #[arg(long, value_delimiter = ',', num_args = 0..)]
+        include: Vec<String>,
+        #[arg(long, value_delimiter = ',', num_args = 0..)]
+        exclude: Vec<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        apply: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        backup: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommand {
+    /// Save the current agent session to the global store (default: ~/.workmesh)
+    Save {
+        #[arg(long)]
+        objective: String,
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        tasks: Option<String>,
+        #[arg(long)]
+        notes: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// List recent agent sessions from the global store
+    List {
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Show a specific agent session
+    Show {
+        session_id: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Resume from a session (prints summary + suggested next commands)
+    Resume {
+        /// Session id; if omitted, uses the current session pointer if present
+        session_id: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Rebuild the global sessions index (JSONL) for fast queries
+    IndexRebuild {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Refresh the global sessions index (JSONL)
+    IndexRefresh {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Verify the global sessions index (JSONL) against source events
+    IndexVerify {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TruthMigrateCommand {
+    /// Detect legacy decision notes and session handoff decisions for migration
+    Audit {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Build a migration plan from audit findings
+    Plan {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Apply migration plan (dry-run by default unless --apply is passed)
+    Apply {
+        #[arg(long, action = ArgAction::SetTrue)]
+        apply: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum TruthCommand {
+    /// Propose a new truth record
+    Propose {
+        #[arg(long)]
+        id: Option<String>,
+        #[arg(long)]
+        title: String,
+        #[arg(long)]
+        statement: String,
+        #[arg(long)]
+        rationale: Option<String>,
+        #[arg(long, default_value = "")]
+        constraints: String,
+        #[arg(long, default_value = "")]
+        tags: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        epic: Option<String>,
+        #[arg(long)]
+        feature: Option<String>,
+        /// Optional workstream id (defaults to the active workstream when --current is set)
+        #[arg(long)]
+        workstream_id: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        worktree_id: Option<String>,
+        #[arg(long)]
+        worktree_path: Option<PathBuf>,
+        /// Auto-fill workstream/session/worktree fields from the current working directory and context.
+        #[arg(long, action = ArgAction::SetTrue)]
+        current: bool,
+        #[arg(long)]
+        actor: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Accept a proposed truth record
+    Accept {
+        truth_id: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        actor: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Reject a proposed truth record
+    Reject {
+        truth_id: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        actor: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Mark an accepted truth as superseded by another accepted truth
+    Supersede {
+        truth_id: String,
+        #[arg(long)]
+        by: String,
+        #[arg(long)]
+        reason: Option<String>,
+        #[arg(long)]
+        actor: Option<String>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Show one truth record by id
+    Show {
+        truth_id: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// List truth records with filters
+    List {
+        #[arg(long, action = ArgAction::Append)]
+        state: Vec<String>,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        epic: Option<String>,
+        #[arg(long)]
+        feature: Option<String>,
+        #[arg(long)]
+        workstream_id: Option<String>,
+        #[arg(long)]
+        session_id: Option<String>,
+        #[arg(long)]
+        worktree_id: Option<String>,
+        #[arg(long)]
+        worktree_path: Option<PathBuf>,
+        #[arg(long, action = ArgAction::Append)]
+        tag: Vec<String>,
+        #[arg(long)]
+        limit: Option<usize>,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Validate truth events/current projection consistency
+    Validate {
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Legacy-decision migration helpers for truth records
+    Migrate {
+        #[command(subcommand)]
+        command: TruthMigrateCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum BulkCommand {
+    /// Bulk set status for tasks
+    SetStatus {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        status: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Bulk set a front matter field for tasks
+    SetField {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        field: String,
+        #[arg(long)]
+        value: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Bulk add label to tasks
+    LabelAdd {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        label: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Bulk remove label from tasks
+    LabelRemove {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        label: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Bulk add dependency to tasks
+    DepAdd {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        dependency: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Bulk remove dependency from tasks
+    DepRemove {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        dependency: String,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+    /// Bulk append a note to tasks
+    Note {
+        #[arg(long, value_delimiter = ',', num_args = 1..)]
+        tasks: Vec<String>,
+        #[arg(long)]
+        note: String,
+        #[arg(long, value_enum, default_value_t = NoteSection::Notes)]
+        section: NoteSection,
+        #[arg(long, action = ArgAction::SetTrue)]
+        touch: bool,
+        /// Do not update `updated_date` (default behavior touches on all mutations)
+        #[arg(long, action = ArgAction::SetTrue)]
+        no_touch: bool,
+        #[arg(long, action = ArgAction::SetTrue)]
+        json: bool,
+    },
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum SortKey {
+    Id,
+    Title,
+    Kind,
+    Status,
+    Phase,
+    Priority,
+}
+
+impl SortKey {
+    fn as_str(self) -> &'static str {
+        match self {
+            SortKey::Id => "id",
+            SortKey::Title => "title",
+            SortKey::Kind => "kind",
+            SortKey::Status => "status",
+            SortKey::Phase => "phase",
+            SortKey::Priority => "priority",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum BoardByArg {
+    Status,
+    Phase,
+    Priority,
+}
+
+impl BoardByArg {
+    fn to_core(self) -> BoardBy {
+        match self {
+            BoardByArg::Status => BoardBy::Status,
+            BoardByArg::Phase => BoardBy::Phase,
+            BoardByArg::Priority => BoardBy::Priority,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum NoteSection {
+    Notes,
+    Impl,
+}
+
+impl NoteSection {
+    fn as_str(self) -> &'static str {
+        match self {
+            NoteSection::Notes => "notes",
+            NoteSection::Impl => "impl",
+        }
+    }
+}
+
+fn is_done_status(status: &str) -> bool {
+    status.eq_ignore_ascii_case("done")
+}
+
+fn is_status_field(field: &str) -> bool {
+    field.trim().eq_ignore_ascii_case("status")
+}
+
+fn effective_touch(touch: bool, no_touch: bool) -> bool {
+    if no_touch {
+        return false;
+    }
+    // Back-compat: `--touch` is still accepted, but touching is now the default on mutations.
+    if touch {
+        return true;
+    }
+    true
+}
+
+fn best_effort_git_snapshot(repo_root: &Path) -> GitSnapshot {
+    let branch = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("rev-parse")
+        .arg("--abbrev-ref")
+        .arg("HEAD")
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .filter(|value| !value.trim().is_empty());
+
+    let head_sha = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("rev-parse")
+        .arg("HEAD")
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .filter(|value| !value.trim().is_empty());
+
+    let dirty = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("status")
+        .arg("--porcelain")
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(!String::from_utf8_lossy(&out.stdout).trim().is_empty())
+            } else {
+                None
+            }
+        });
+
+    GitSnapshot {
+        branch,
+        head_sha,
+        dirty,
+    }
+}
+
+fn best_effort_git_branch(repo_root: &Path) -> Option<String> {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo_root)
+        .arg("rev-parse")
+        .arg("--abbrev-ref")
+        .arg("HEAD")
+        .output()
+        .ok()
+        .and_then(|out| {
+            if out.status.success() {
+                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+            } else {
+                None
+            }
+        })
+        .filter(|value| !value.trim().is_empty())
+}
+
+fn render_session_line(session: &AgentSession) -> String {
+    format!(
+        "{} | {} | {} | {}",
+        session.id, session.updated_at, session.cwd, session.objective
+    )
+}
+
+fn render_session_detail(session: &AgentSession) -> String {
+    let mut lines = Vec::new();
+    lines.push(format!("id: {}", session.id));
+    lines.push(format!("updated_at: {}", session.updated_at));
+    lines.push(format!("cwd: {}", session.cwd));
+    if let Some(repo_root) = session.repo_root.as_deref() {
+        lines.push(format!("repo_root: {}", repo_root));
+    }
+    if let Some(project_id) = session.project_id.as_deref() {
+        lines.push(format!("project_id: {}", project_id));
+    }
+    if let Some(epic_id) = session.epic_id.as_deref() {
+        lines.push(format!("epic_id: {}", epic_id));
+    }
+    lines.push(format!("objective: {}", session.objective));
+    if !session.working_set.is_empty() {
+        lines.push(format!("working_set: {}", session.working_set.join(", ")));
+    }
+    if let Some(notes) = session.notes.as_deref() {
+        if !notes.trim().is_empty() {
+            lines.push(format!("notes: {}", notes));
+        }
+    }
+    if let Some(git) = session.git.as_ref() {
+        if git.branch.is_some() || git.head_sha.is_some() || git.dirty.is_some() {
+            lines.push(format!(
+                "git: branch={} sha={} dirty={}",
+                git.branch.clone().unwrap_or_else(|| "-".to_string()),
+                git.head_sha.clone().unwrap_or_else(|| "-".to_string()),
+                git.dirty
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            ));
+        }
+    }
+    if let Some(checkpoint) = session.checkpoint.as_ref() {
+        lines.push(format!("checkpoint: {}", checkpoint.path));
+    }
+    if let Some(worktree) = session.worktree.as_ref() {
+        lines.push(format!("worktree.path: {}", worktree.path));
+        if let Some(branch) = worktree.branch.as_deref() {
+            lines.push(format!("worktree.branch: {}", branch));
+        }
+        if let Some(id) = worktree.id.as_deref() {
+            lines.push(format!("worktree.id: {}", id));
+        }
+    }
+    if let Some(handoff) = session.handoff.as_ref() {
+        if !handoff.completed.is_empty() {
+            lines.push(format!(
+                "handoff.completed: {}",
+                handoff.completed.join(" | ")
+            ));
+        }
+        if !handoff.remaining.is_empty() {
+            lines.push(format!(
+                "handoff.remaining: {}",
+                handoff.remaining.join(" | ")
+            ));
+        }
+        if !handoff.decisions.is_empty() {
+            lines.push(format!(
+                "handoff.decisions: {}",
+                handoff.decisions.join(" | ")
+            ));
+        }
+        if !handoff.unknowns.is_empty() {
+            lines.push(format!(
+                "handoff.unknowns: {}",
+                handoff.unknowns.join(" | ")
+            ));
+        }
+        if let Some(next_step) = handoff.next_step.as_deref() {
+            if !next_step.trim().is_empty() {
+                lines.push(format!("handoff.next_step: {}", next_step));
+            }
+        }
+    }
+    if !session.truth_refs.is_empty() {
+        lines.push(format!("truth_refs: {}", session.truth_refs.join(", ")));
+    }
+    lines.join("\n")
+}
+
+fn resume_script(session: &AgentSession) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(worktree) = session.worktree.as_ref() {
+        lines.push(format!("cd {}", worktree.path));
+    } else {
+        lines.push(format!("cd {}", session.cwd));
+    }
+
+    if let Some(repo_root) = session.repo_root.as_deref() {
+        lines.push(format!("workmesh --root {} context show", repo_root));
+        let mut truth_line = format!("workmesh --root {} truth list --state accepted", repo_root);
+        if let Some(project_id) = session.project_id.as_deref() {
+            truth_line.push_str(&format!(" --project {}", project_id));
+        }
+        if let Some(epic_id) = session.epic_id.as_deref() {
+            truth_line.push_str(&format!(" --epic {}", epic_id));
+        }
+        if let Some(worktree) = session.worktree.as_ref() {
+            truth_line.push_str(&format!(" --worktree-path {}", worktree.path));
+        }
+        truth_line.push_str(" --limit 10");
+        lines.push(truth_line);
+    }
+
+    if let (Some(repo_root), Some(project_id)) =
+        (session.repo_root.as_deref(), session.project_id.as_deref())
+    {
+        lines.push(format!(
+            "workmesh --root {} resume --project {}",
+            repo_root, project_id
+        ));
+        lines.push(format!("workmesh --root {} ready", repo_root));
+    }
+
+    if let Some(repo_root) = session.repo_root.as_deref() {
+        if let Some(task_id) = session.working_set.first() {
+            lines.push(format!("workmesh --root {} show {}", repo_root, task_id));
+            lines.push(format!(
+                "workmesh --root {} claim {} you",
+                repo_root, task_id
+            ));
+        }
+    }
+
+    if !session.truth_refs.is_empty() {
+        lines.push(format!(
+            "# accepted truths: {}",
+            session.truth_refs.join(", ")
+        ));
+    }
+
+    lines
+}
+
+fn parse_truth_states(values: &[String]) -> Result<Vec<TruthState>> {
+    let mut states = Vec::new();
+    let mut seen = HashSet::new();
+    for value in split_list(values) {
+        let Some(state) = TruthState::parse(&value) else {
+            die(&format!(
+                "Invalid truth state: {} (expected proposed|accepted|rejected|superseded)",
+                value
+            ));
+        };
+        if seen.insert(state) {
+            states.push(state);
+        }
+    }
+    Ok(states)
+}
+
+fn render_truth_line(record: &workmesh_core::truth::TruthRecord) -> String {
+    let feature = record
+        .context
+        .feature
+        .clone()
+        .or(record.context.epic_id.clone())
+        .unwrap_or_else(|| "-".to_string());
+    format!(
+        "{} | {} | {} | feature={} | v{}",
+        record.id,
+        record.state.as_str(),
+        record.title,
+        feature,
+        record.version
+    )
+}
+
+fn truth_refs_for_scope(
+    backlog_dir: &Path,
+    project_id: Option<&str>,
+    epic_id: Option<&str>,
+    worktree_path: Option<&str>,
+    limit: usize,
+) -> Vec<String> {
+    let query = TruthQuery {
+        states: vec![TruthState::Accepted],
+        project_id: project_id.map(|value| value.to_string()),
+        epic_id: epic_id.map(|value| value.to_string()),
+        feature: epic_id.map(|value| value.to_string()),
+        workstream_id: None,
+        session_id: None,
+        worktree_id: None,
+        worktree_path: worktree_path.map(|value| value.to_string()),
+        tags: Vec::new(),
+        limit: Some(limit),
+    };
+    list_truths(backlog_dir, &query)
+        .map(|records| records.into_iter().map(|record| record.id).collect())
+        .unwrap_or_default()
+}
+
+fn auto_update_current_session(backlog_dir: &Path) -> Result<()> {
+    let home = resolve_workmesh_home()?;
+    let Some(current_id) = read_current_session_id(&home) else {
+        return Ok(());
+    };
+
+    let sessions = load_sessions_latest_fast(&home)?;
+    let Some(existing) = sessions.into_iter().find(|s| s.id == current_id) else {
+        return Ok(());
+    };
+
+    let rr = repo_root_from_backlog(backlog_dir);
+    let repo_root = rr.to_string_lossy().to_string();
+    let repo_tasks = load_tasks(backlog_dir);
+    let context_state = load_context_state(backlog_dir);
+    let project_id = context_state
+        .as_ref()
+        .and_then(|c| c.project_id.clone())
+        .unwrap_or_else(|| resolve_project_id(&rr, &repo_tasks, None));
+    let epic_id = context_state
+        .as_ref()
+        .and_then(|c| c.scope.epic_id.clone())
+        .or_else(|| best_effort_git_branch(&rr).and_then(|b| extract_task_id_from_branch(&b)));
+
+    let working_set: Vec<String> = repo_tasks
+        .iter()
+        .filter(|task| task.status.eq_ignore_ascii_case("in progress") || is_lease_active(task))
+        .map(|task| task.id.clone())
+        .collect();
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let cwd_str = cwd.to_string_lossy().to_string();
+
+    let mut checkpoint: Option<CheckpointRef> = None;
+    let mut recent_changes: Option<workmesh_core::global_sessions::RecentChanges> = None;
+    if let Ok(Some(summary)) = resume_summary(&rr, &project_id, None) {
+        checkpoint = Some(CheckpointRef {
+            path: summary.checkpoint_path.to_string_lossy().to_string(),
+            timestamp: Some(summary.snapshot.generated_at.clone()),
+        });
+        recent_changes = Some(workmesh_core::global_sessions::RecentChanges {
+            dirs: summary.snapshot.top_level_dirs.clone(),
+            files: summary.snapshot.changed_files.clone(),
+        });
+    }
+
+    let now = now_rfc3339();
+    let worktree = best_effort_worktree_binding(&home, &cwd, Some(repo_root.as_str()))
+        .or(existing.worktree.clone());
+    let truth_refs = truth_refs_for_scope(
+        backlog_dir,
+        Some(project_id.as_str()),
+        epic_id.as_deref(),
+        worktree.as_ref().map(|binding| binding.path.as_str()),
+        10,
+    );
+    let updated = AgentSession {
+        id: existing.id.clone(),
+        created_at: existing.created_at.clone(),
+        updated_at: now,
+        cwd: cwd_str,
+        repo_root: Some(repo_root),
+        project_id: Some(project_id),
+        epic_id: epic_id.or(existing.epic_id.clone()),
+        objective: existing.objective.clone(),
+        working_set,
+        notes: existing.notes.clone(),
+        git: Some(best_effort_git_snapshot(&rr)),
+        checkpoint,
+        recent_changes,
+        handoff: existing.handoff.clone(),
+        worktree,
+        truth_refs,
+    };
+
+    append_session_saved(&home, updated.clone())?;
+    set_current_session(&home, &updated.id)?;
+    Ok(())
+}
+
+fn main() -> Result<()> {
+    let cli = Cli::parse_from(rewrite_cli_args(std::env::args_os().collect()));
+    if let Command::Readme { json } = &cli.command {
+        let repo_root = resolve_cli_repo_root(&cli.root);
+        let path = repo_root.join("README.json");
+        let raw = std::fs::read_to_string(&path)?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw)?;
+        if *json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "path": path,
+                    "readme": parsed,
+                }))?
+            );
+        } else {
+            println!("{}", raw);
+        }
+        return Ok(());
+    }
+
+    if let Command::ToolInfo { name, json } = &cli.command {
+        let Some(info) = build_tool_info_payload(name, placeholder_tool_definition(name)) else {
+            die(&format!("Unknown tool: {}", name));
+        };
+        if *json {
+            println!("{}", serde_json::to_string_pretty(&info)?);
+        } else {
+            println!("{}", render_tool_info_text(name, &info));
+        }
+        return Ok(());
+    }
+
+    if let Command::SkillContent { name, json } = &cli.command {
+        let repo_root = resolve_cli_repo_root(&cli.root);
+        let skill_name = name
+            .as_deref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("workmesh");
+        let skill = load_skill_content(Some(&repo_root), skill_name)
+            .or_else(|| load_skill_content(None, skill_name))
+            .unwrap_or_else(|| die(&format!("Skill not found: {}", skill_name)));
+        if *json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "name": skill_name,
+                    "source": skill.source,
+                    "content": skill.content,
+                }))?
+            );
+        } else {
+            println!("{}", skill.content);
+        }
+        return Ok(());
+    }
+
+    if let Command::ProjectManagementSkill { name, json } = &cli.command {
+        let repo_root = resolve_cli_repo_root(&cli.root);
+        let skill_name = name
+            .as_deref()
+            .map(|value| value.trim())
+            .filter(|value| !value.is_empty())
+            .unwrap_or("workmesh");
+        let skill = load_skill_content(Some(&repo_root), skill_name)
+            .or_else(|| load_skill_content(None, skill_name))
+            .unwrap_or_else(|| die(&format!("Skill not found: {}", skill_name)));
+        if *json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "summary": "workmesh project management skill",
+                    "name": skill_name,
+                    "source": skill.source,
+                    "content": skill.content,
+                }))?
+            );
+        } else {
+            println!("{}", skill.content);
+        }
+        return Ok(());
+    }
+
+    if let Command::Bootstrap {
+        project_id,
+        feature,
+        objective,
+        tasks_root,
+        state_root,
+        json,
+    } = &cli.command
+    {
+        let repo_root = resolve_cli_repo_root(&cli.root);
+        let result = bootstrap_repo(
+            &repo_root,
+            &BootstrapOptions {
+                project_id: project_id.clone(),
+                project_name: None,
+                feature: feature.clone(),
+                objective: objective.clone(),
+                agents_snippet: true,
+                tasks_root: tasks_root.clone(),
+                state_root: state_root.clone(),
+            },
+        )?;
+        if *json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!("Bootstrap state: {}", result.state.as_str());
+            println!("Repo root: {}", result.repo_root.display());
+            println!("State root: {}", result.state_root.display());
+            println!("Tasks root: {}", result.tasks_root.display());
+            println!("Project: {}", result.project_id);
+            if result.quickstart.is_some() {
+                println!("Initialized WorkMesh layout and seed task.");
+            }
+            if !result.migration_applied.is_empty() {
+                println!("Applied migration steps:");
+                for step in &result.migration_applied {
+                    println!("  - {}", step);
+                }
+            }
+            for warning in &result.migration_warnings {
+                println!("warning: {}", warning);
+            }
+            if result.context_seeded {
+                println!("Seeded context: {}", result.context_path.display());
+            } else {
+                println!("Context already present: {}", result.context_path.display());
+            }
+            if !result.next_task_ids.is_empty() {
+                println!("Next tasks: {}", result.next_task_ids.join(", "));
+            }
+            for hint in &result.recommendations {
+                println!("hint: {}", hint);
+            }
+        }
+        return Ok(());
+    }
+
+    if let Command::Quickstart {
+        project_id,
+        name,
+        feature,
+        tasks_root,
+        state_root,
+        agents_snippet,
+        json,
+    } = &cli.command
+    {
+        let repo_root = resolve_cli_repo_root(&cli.root);
+        let result = quickstart(
+            &repo_root,
+            project_id,
+            name.as_deref(),
+            feature.as_deref(),
+            &QuickstartOptions {
+                agents_snippet: *agents_snippet,
+                tasks_root: tasks_root.clone(),
+                state_root: state_root.clone(),
+            },
+        )?;
+        if *json {
+            println!("{}", serde_json::to_string_pretty(&result)?);
+        } else {
+            println!("Docs: {}", result.project_dir.display());
+            println!("State root: {}", result.state_root.display());
+            println!("Tasks root: {}", result.tasks_root.display());
+            if let Some(task_path) = result.created_task.as_ref() {
+                println!("Seed task: {}", task_path.display());
+            }
+            if result.agents_snippet_written {
+                println!("AGENTS.md updated");
+            }
+            if result.worktrees_default {
+                println!(
+                    "Worktree defaults: enabled (source: {}).",
+                    result.worktrees_default_source
+                );
+                if let Some(hint) = result.worktree_hint.as_deref() {
+                    println!("Recommended for parallel streams:");
+                    println!("  {}", hint);
+                }
+                if let Some(path) = global_config_path() {
+                    println!(
+                        "Disable globally by setting `worktrees_default = false` in {}",
+                        path.display()
+                    );
+                } else {
+                    println!(
+                        "Disable globally by setting `worktrees_default = false` in $WORKMESH_HOME/config.toml"
+                    );
+                }
+                println!(
+                    "Per-repo override: set `worktrees_default = true|false` in `.workmesh.toml`."
+                );
+            } else {
+                println!(
+                    "Worktree defaults: disabled (source: {}).",
+                    result.worktrees_default_source
+                );
+                println!("Enable for this repo with `.workmesh.toml`: `worktrees_default = true`.");
+            }
+        }
+        return Ok(());
+    }
+
+    if let Command::Install {
+        skills,
+        profile,
+        scope,
+        agent,
+        force,
+        json,
+    } = &cli.command
+    {
+        if !skills {
+            die("install currently supports only --skills");
+        }
+        let repo_root = resolve_cli_repo_root(&cli.root);
+        let mut report = SkillInstallReport::default();
+        let names = skill_names_for_profile(*profile);
+        for name in names.iter() {
+            let partial = install_embedded_skill_report(
+                Some(&repo_root),
+                (*scope).into(),
+                (*agent).into(),
+                name,
+                *force,
+            )?;
+            merge_install_report(&mut report, partial);
+        }
+        if *json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "profile": format!("{:?}", profile).to_lowercase(),
+                    "scope": format!("{:?}", scope).to_lowercase(),
+                    "agent": format!("{:?}", agent).to_lowercase(),
+                    "skills": names,
+                    "written": report.written,
+                    "skipped": report.skipped
+                }))?
+            );
+        } else {
+            println!(
+                "Installed profile={} scope={} agent={} skills={}",
+                format!("{:?}", profile).to_lowercase(),
+                format!("{:?}", scope).to_lowercase(),
+                format!("{:?}", agent).to_lowercase(),
+                names.join(", ")
+            );
+            print_install_report(report);
+        }
+        return Ok(());
+    }
+
+    if let Command::Uninstall {
+        skills,
+        profile,
+        scope,
+        agent,
+        json,
+    } = &cli.command
+    {
+        if !skills {
+            die("uninstall currently supports only --skills");
+        }
+        let repo_root = resolve_cli_repo_root(&cli.root);
+        let mut report = SkillUninstallReport::default();
+        let names = skill_names_for_profile(*profile);
+        for name in names.iter() {
+            let partial = uninstall_embedded_skill_report(
+                Some(&repo_root),
+                (*scope).into(),
+                (*agent).into(),
+                name,
+            )?;
+            merge_uninstall_report(&mut report, partial);
+        }
+        if *json {
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "ok": true,
+                    "profile": format!("{:?}", profile).to_lowercase(),
+                    "scope": format!("{:?}", scope).to_lowercase(),
+                    "agent": format!("{:?}", agent).to_lowercase(),
+                    "skills": names,
+                    "removed": report.removed,
+                    "missing": report.missing
+                }))?
+            );
+        } else {
+            println!(
+                "Uninstalled profile={} scope={} agent={} skills={}",
+                format!("{:?}", profile).to_lowercase(),
+                format!("{:?}", scope).to_lowercase(),
+                format!("{:?}", agent).to_lowercase(),
+                names.join(", ")
+            );
+            print_uninstall_report(report);
+        }
+        return Ok(());
+    }
+
+    if let Command::Doctor { json, fix_storage } = &cli.command {
+        let report = if *fix_storage {
+            doctor_report_with_options(&cli.root, "workmesh", true)
+        } else {
+            doctor_report(&cli.root, "workmesh")
+        };
+        if *json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!("root: {}", report["root"].as_str().unwrap_or(""));
+            println!("repo_root: {}", report["repo_root"].as_str().unwrap_or(""));
+            println!(
+                "backlog_dir: {}",
+                report["backlog_dir"].as_str().unwrap_or("")
+            );
+            println!("layout: {}", report["layout"].as_str().unwrap_or(""));
+            if !report["context"].is_null() {
+                let epic = report["context"]["scope"]["epic_id"].as_str().unwrap_or("");
+                let project = report["context"]["project_id"].as_str().unwrap_or("");
+                let mode = report["context"]["scope"]["mode"]
+                    .as_str()
+                    .unwrap_or("none");
+                println!(
+                    "context: project_id={} scope_mode={} epic_id={}",
+                    project, mode, epic
+                );
+            } else {
+                println!("context: (none)");
+            }
+            let present = report["index"]["present"].as_bool().unwrap_or(false);
+            let entries = report["index"]["entries"].as_i64().unwrap_or(0);
+            println!("index: present={} entries={}", present, entries);
+            if !report["truth"].is_null() {
+                println!(
+                    "truth: events={} records={} validation_ok={}",
+                    report["truth"]["event_count"].as_i64().unwrap_or(0),
+                    report["truth"]["record_count"].as_i64().unwrap_or(0),
+                    report["truth"]["validation_ok"].as_bool().unwrap_or(true)
+                );
+            }
+            if !report["storage"].is_null() {
+                println!(
+                    "storage: ok={} malformed_total={} projection_mismatches={}",
+                    report["storage"]["ok"].as_bool().unwrap_or(false),
+                    report["storage"]["jsonl"]["malformed_total"]
+                        .as_i64()
+                        .unwrap_or(0),
+                    report["storage"]["truth_projection"]["projection_mismatches"]
+                        .as_array()
+                        .map(|items| items.len())
+                        .unwrap_or(0)
+                );
+                if *fix_storage {
+                    println!(
+                        "storage_fix: ok={} sessions_trimmed={} truth_trimmed={}",
+                        report["storage"]["fix"]["ok"].as_bool().unwrap_or(false),
+                        report["storage"]["fix"]["sessions_trimmed"]
+                            .as_i64()
+                            .unwrap_or(0),
+                        report["storage"]["fix"]["truth_trimmed"]
+                            .as_i64()
+                            .unwrap_or(0),
+                    );
+                }
+            }
+            println!(
+                "versions: workmesh={} workmesh-mcp={}",
+                report["versions"]["workmesh"].as_str().unwrap_or(""),
+                report["versions"]["workmesh_mcp"].as_str().unwrap_or("")
+            );
+        }
+        return Ok(());
+    }
+
+    if let Command::Config { command } = &cli.command {
+        let repo_root = resolve_cli_repo_root(&cli.root);
+        handle_config_command(&repo_root, command)?;
+        return Ok(());
+    }
+
+    if let Command::Migrate { command, to, yes } = &cli.command {
+        if let Some(migrate_cmd) = command {
+            handle_migrate_workflow(&cli.root, migrate_cmd)?;
+        } else {
+            let resolution = resolve_backlog(&cli.root)?;
+            let target = to.as_deref().unwrap_or("workmesh");
+            handle_migrate_command(&resolution, target, *yes)?;
+        }
+        return Ok(());
+    }
+
+    if let Command::Render { command } = &cli.command {
+        handle_render_command(command)?;
+        return Ok(());
+    }
+
+    let resolution = resolve_backlog(&cli.root)?;
+    let backlog_dir = maybe_prompt_migration(&resolution)?;
+    let tasks = load_tasks(&backlog_dir);
+    let repo_root = repo_root_from_backlog(&backlog_dir);
+    let task_rules = resolve_task_validation_rules(&repo_root);
+    let auto_checkpoint = auto_checkpoint_enabled(&cli);
+    let auto_session = auto_session_enabled(&cli, &resolution.repo_root);
+
+    match cli.command {
+        Command::Readme { .. }
+        | Command::ToolInfo { .. }
+        | Command::SkillContent { .. }
+        | Command::ProjectManagementSkill { .. } => {
+            unreachable!("handled before backlog resolution")
+        }
+        Command::Board {
+            all,
+            by,
+            focus,
+            json,
+        } => {
+            let tasks = if all {
+                load_tasks_with_archive(&backlog_dir)
+            } else {
+                load_tasks(&backlog_dir)
+            };
+            let context_state = if focus {
+                load_context_state(&backlog_dir)
+            } else {
+                None
+            };
+            let scope_ids = context_state
+                .as_ref()
+                .and_then(|c| scope_ids_from_context(&tasks, c));
+            let lanes = board_lanes(&tasks, by.to_core(), scope_ids.as_ref());
+
+            if json {
+                let payload: Vec<serde_json::Value> = lanes
+                    .into_iter()
+                    .map(|(key, lane_tasks)| {
+                        let tasks_json: Vec<serde_json::Value> = lane_tasks
+                            .into_iter()
+                            .map(|t| task_to_json_value(t, false))
+                            .collect();
+                        serde_json::json!({
+                            "lane": key,
+                            "count": tasks_json.len(),
+                            "tasks": tasks_json,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+
+            for (key, lane_tasks) in lanes {
+                println!("## {} ({})", key, lane_tasks.len());
+                for task in lane_tasks {
+                    println!("{}", render_task_line(task));
+                }
+                println!();
+            }
+        }
+        Command::Blockers { all, epic_id, json } => {
+            let tasks = if all {
+                load_tasks_with_archive(&backlog_dir)
+            } else {
+                load_tasks(&backlog_dir)
+            };
+            let context_state = load_context_state(&backlog_dir);
+            let report =
+                blockers_report_with_context(&tasks, context_state.as_ref(), epic_id.as_deref());
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+                return Ok(());
+            }
+
+            println!("Scope: {}", report.scope);
+            if !report.warnings.is_empty() {
+                println!("Warnings:");
+                for w in report.warnings.iter() {
+                    println!("- {}", w);
+                }
+            }
+            if report.blocked_tasks.is_empty() {
+                println!("Blocked tasks: (none)");
+            } else {
+                println!("Blocked tasks:");
+                for entry in report.blocked_tasks.iter() {
+                    let mut parts = Vec::new();
+                    if !entry.blockers.is_empty() {
+                        parts.push(format!("blocked_by=[{}]", entry.blockers.join(", ")));
+                    }
+                    if !entry.missing_refs.is_empty() {
+                        parts.push(format!("missing_refs=[{}]", entry.missing_refs.join(", ")));
+                    }
+                    println!(
+                        "- {}: {} ({}) {}",
+                        entry.id,
+                        entry.title,
+                        entry.status,
+                        parts.join(" ")
+                    );
+                }
+            }
+            if report.top_blockers.is_empty() {
+                println!("Top blockers: (none)");
+            } else {
+                println!("Top blockers:");
+                for b in report.top_blockers.iter().take(10) {
+                    println!("- {} blocks {}", b.id, b.blocked_count);
+                }
+            }
+        }
+        Command::List {
+            all,
+            status,
+            kind,
+            phase,
+            priority,
+            label,
+            depends_on,
+            deps_satisfied,
+            blocked,
+            search,
+            sort,
+            limit,
+            json,
+        } => {
+            let tasks = if all {
+                load_tasks_with_archive(&backlog_dir)
+            } else {
+                load_tasks(&backlog_dir)
+            };
+            let filtered = filter_tasks(
+                &tasks,
+                to_list(status.as_slice()).as_deref(),
+                to_list(kind.as_slice()).as_deref(),
+                to_list(phase.as_slice()).as_deref(),
+                to_list(priority.as_slice()).as_deref(),
+                to_list(label.as_slice()).as_deref(),
+                depends_on.as_deref(),
+                if deps_satisfied { Some(true) } else { None },
+                if blocked { Some(true) } else { None },
+                search.as_deref(),
+            );
+            let mut sorted = sort_tasks(filtered, sort.as_str());
+            if let Some(limit) = limit {
+                sorted.truncate(limit);
+            }
+            if json {
+                let payload: Vec<_> = sorted.iter().map(|task| (*task).clone()).collect();
+                println!("{}", tasks_to_json(&payload, false));
+                return Ok(());
+            }
+            for task in sorted {
+                println!("{}", render_task_line(task));
+            }
+        }
+        Command::Next { json } => {
+            let context = load_context_state(&backlog_dir);
+            let recommended =
+                recommend_next_tasks_with_context_and_rules(&tasks, context.as_ref(), &task_rules);
+            let task = recommended.first().map(|t| (*t).clone());
+            if json {
+                if let Some(task) = task {
+                    let value = task_to_json_value_with_context(&task, &tasks, false);
+                    println!("{}", serde_json::to_string_pretty(&value)?);
+                } else {
+                    println!("{{}}");
+                }
+            } else if let Some(task) = task {
+                println!("{}", render_task_line_with_ancestry(&task, &tasks));
+            }
+        }
+        Command::NextTasks { json, limit } => {
+            let context = load_context_state(&backlog_dir);
+            let mut recommended =
+                recommend_next_tasks_with_context_and_rules(&tasks, context.as_ref(), &task_rules);
+            if let Some(limit) = limit {
+                recommended.truncate(limit);
+            }
+            if json {
+                let payload: Vec<_> = recommended
+                    .iter()
+                    .map(|task| task_to_json_value_with_context(task, &tasks, false))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+            for task in recommended {
+                println!("{}", render_task_line_with_ancestry(task, &tasks));
+            }
+        }
+        Command::Ready { json, limit } => {
+            let mut ready = ready_tasks_with_rules(&tasks, &task_rules);
+            if let Some(limit) = limit {
+                ready.truncate(limit);
+            }
+            if json {
+                let payload: Vec<_> = ready
+                    .iter()
+                    .map(|task| task_to_json_value_with_context(task, &tasks, false))
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+                return Ok(());
+            }
+            for task in ready {
+                println!("{}", render_task_line_with_ancestry(task, &tasks));
+            }
+        }
+        Command::Show {
+            task_id,
+            full,
+            json,
+        } => {
+            let task = find_task(&tasks, &task_id).unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            if json {
+                let value = task_to_json_value(task, true);
+                println!("{}", serde_json::to_string_pretty(&value)?);
+                return Ok(());
+            }
+            if full {
+                if let Some(path) = &task.file_path {
+                    let content = std::fs::read_to_string(path)?;
+                    println!("{}", content);
+                    return Ok(());
+                }
+            }
+            println!("{}", render_task_line(task));
+        }
+        Command::Stats { json } => {
+            let stats = status_counts(&tasks);
+            if json {
+                let mut map = serde_json::Map::new();
+                for (key, value) in stats {
+                    map.insert(key, serde_json::Value::from(value as u64));
+                }
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::Value::Object(map))?
+                );
+            } else {
+                for (key, value) in stats {
+                    println!("{}: {}", key, value);
+                }
+            }
+        }
+        Command::Fix { command } => match command {
+            FixCommand::List { json } => {
+                let fixers = all_fix_targets()
+                    .into_iter()
+                    .map(as_fixer_kind)
+                    .map(|kind| kind.as_str().to_string())
+                    .collect::<Vec<_>>();
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "fixers": fixers,
+                        }))?
+                    );
+                } else {
+                    for fixer in fixers {
+                        println!("{}", fixer);
+                    }
+                }
+            }
+            FixCommand::All {
+                apply,
+                check,
+                only,
+                exclude,
+                json,
+            } => {
+                let apply_mode = parse_fix_mode(apply, check)?;
+                let targets = select_fix_targets(&only, &exclude);
+                if targets.is_empty() {
+                    die("No fixers selected. Adjust --only/--exclude.");
+                }
+                let mut runs = Vec::new();
+                for target in targets {
+                    runs.push(run_fix_target(&backlog_dir, target, apply_mode)?);
+                }
+
+                let total_detected: usize = runs.iter().map(|run| run.detected).sum();
+                let total_fixed: usize = runs.iter().map(|run| run.fixed).sum();
+                let total_skipped: usize = runs.iter().map(|run| run.skipped).sum();
+                let runs_json: Vec<serde_json::Value> = runs.iter().map(fix_run_to_json).collect();
+
+                if apply_mode {
+                    audit_event(
+                        &backlog_dir,
+                        "fix_all",
+                        None,
+                        serde_json::json!({
+                            "runs": runs_json.clone(),
+                            "fixed": total_fixed,
+                        }),
+                    )?;
+                    refresh_index_best_effort(&backlog_dir);
+                    maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+                }
+
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": true,
+                            "mode": if apply_mode { "apply" } else { "check" },
+                            "runs": runs_json,
+                            "totals": {
+                                "detected": total_detected,
+                                "fixed": total_fixed,
+                                "skipped": total_skipped,
+                            }
+                        }))?
+                    );
+                } else {
+                    for run in &runs {
+                        print_fix_report(run, apply_mode);
+                    }
+                    if !apply_mode {
+                        println!("Dry-run: re-run with --apply to write changes.");
+                    }
+                }
+            }
+            FixCommand::Uid { apply, check, json } => {
+                let apply_mode = parse_fix_mode(apply, check)?;
+                let run = run_fix_target(&backlog_dir, FixTargetArg::Uid, apply_mode)?;
+                if apply_mode {
+                    audit_event(
+                        &backlog_dir,
+                        "fix_uid",
+                        None,
+                        serde_json::json!({ "fixed": run.fixed }),
+                    )?;
+                    refresh_index_best_effort(&backlog_dir);
+                    maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+                }
+                if json {
+                    let run_json = fix_run_to_json(&run);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": true,
+                            "mode": if apply_mode { "apply" } else { "check" },
+                            "run": run_json
+                        }))?
+                    );
+                } else {
+                    print_fix_report(&run, apply_mode);
+                    if !apply_mode {
+                        println!("Dry-run: re-run with --apply to write changes.");
+                    }
+                }
+            }
+            FixCommand::Deps { apply, check, json } => {
+                let apply_mode = parse_fix_mode(apply, check)?;
+                let run = run_fix_target(&backlog_dir, FixTargetArg::Deps, apply_mode)?;
+                if apply_mode {
+                    audit_event(
+                        &backlog_dir,
+                        "fix_deps",
+                        None,
+                        serde_json::json!({ "fixed": run.fixed }),
+                    )?;
+                    refresh_index_best_effort(&backlog_dir);
+                    maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+                }
+                if json {
+                    let run_json = fix_run_to_json(&run);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": true,
+                            "mode": if apply_mode { "apply" } else { "check" },
+                            "run": run_json
+                        }))?
+                    );
+                } else {
+                    print_fix_report(&run, apply_mode);
+                    if !apply_mode {
+                        println!("Dry-run: re-run with --apply to write changes.");
+                    }
+                }
+            }
+            FixCommand::Ids { apply, check, json } => {
+                let apply_mode = parse_fix_mode(apply, check)?;
+                let run = run_fix_target(&backlog_dir, FixTargetArg::Ids, apply_mode)?;
+                if apply_mode {
+                    audit_event(
+                        &backlog_dir,
+                        "fix_ids",
+                        None,
+                        serde_json::json!({ "fixed": run.fixed }),
+                    )?;
+                    refresh_index_best_effort(&backlog_dir);
+                    maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+                }
+                if json {
+                    let run_json = fix_run_to_json(&run);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": true,
+                            "mode": if apply_mode { "apply" } else { "check" },
+                            "run": run_json
+                        }))?
+                    );
+                } else {
+                    print_fix_report(&run, apply_mode);
+                    if !apply_mode {
+                        println!("Dry-run: re-run with --apply to write changes.");
+                    }
+                }
+            }
+            FixCommand::Filenames { apply, check, json } => {
+                let apply_mode = parse_fix_mode(apply, check)?;
+                let run = run_fix_target(&backlog_dir, FixTargetArg::Filenames, apply_mode)?;
+                if apply_mode {
+                    audit_event(
+                        &backlog_dir,
+                        "fix_filenames",
+                        None,
+                        serde_json::json!({ "fixed": run.fixed }),
+                    )?;
+                    refresh_index_best_effort(&backlog_dir);
+                    maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+                }
+                if json {
+                    let run_json = fix_run_to_json(&run);
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": true,
+                            "mode": if apply_mode { "apply" } else { "check" },
+                            "run": run_json
+                        }))?
+                    );
+                } else {
+                    print_fix_report(&run, apply_mode);
+                    if !apply_mode {
+                        println!("Dry-run: re-run with --apply to write changes.");
+                    }
+                }
+            }
+        },
+        Command::RekeyPrompt {
+            all,
+            include_body,
+            limit,
+            json,
+        } => {
+            let prompt = render_rekey_prompt(
+                &backlog_dir,
+                RekeyPromptOptions {
+                    include_body,
+                    include_archive: all,
+                    limit,
+                },
+            );
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "prompt": prompt,
+                    }))?
+                );
+            } else {
+                println!("{}", prompt);
+            }
+        }
+        Command::RekeyApply {
+            mapping,
+            apply,
+            all,
+            strict,
+            non_strict,
+            json,
+        } => {
+            let mapping_text = read_content(None, mapping.as_deref())?;
+            let mut request = parse_rekey_request(&mapping_text)?;
+            if strict && non_strict {
+                die("Invalid flags: use either --strict or --non-strict (or neither).");
+            }
+            if strict {
+                request.strict = true;
+            }
+            if non_strict {
+                request.strict = false;
+            }
+            let report = rekey_apply(
+                &backlog_dir,
+                &request,
+                RekeyApplyOptions {
+                    apply,
+                    strict: request.strict,
+                    include_archive: all,
+                },
+            )?;
+            if apply {
+                audit_event(
+                    &backlog_dir,
+                    "rekey_apply",
+                    None,
+                    serde_json::json!({ "changes": report.changes.len(), "strict": request.strict }),
+                )?;
+                refresh_index_best_effort(&backlog_dir);
+                maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::to_value(&report)?)?
+                );
+            } else if report.changes.is_empty() {
+                println!("No tasks matched the mapping.");
+            } else {
+                for warning in &report.warnings {
+                    eprintln!("warning: {}", warning);
+                }
+                for change in &report.changes {
+                    if let Some(new_path) = &change.new_path {
+                        println!(
+                            "{} -> {} ({})",
+                            change.old_id,
+                            change.new_id,
+                            new_path.display()
+                        );
+                    } else {
+                        println!("{} -> {}", change.old_id, change.new_id);
+                    }
+                }
+                if !apply {
+                    println!("Dry-run: re-run with --apply to write changes.");
+                }
+            }
+        }
+        Command::GraphExport { pretty } => {
+            let graph = graph_export(&tasks);
+            if pretty {
+                println!("{}", serde_json::to_string_pretty(&graph)?);
+            } else {
+                println!("{}", serde_json::to_string(&graph)?);
+            }
+        }
+        Command::Export { pretty } => {
+            let payload = serde_json::from_str::<serde_json::Value>(&tasks_to_json(&tasks, true))?;
+            if pretty {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{}", serde_json::to_string(&payload)?);
+            }
+        }
+        Command::IssuesExport {
+            output,
+            include_body,
+        } => {
+            let payload = tasks_to_jsonl(&tasks, include_body);
+            if let Some(output) = output {
+                std::fs::write(&output, payload)?;
+                println!("{}", output.display());
+            } else {
+                println!("{}", payload);
+            }
+        }
+        Command::IndexRebuild { json } => {
+            let summary = rebuild_index(&backlog_dir)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            } else {
+                println!(
+                    "Index rebuild -> {} ({} entries)",
+                    summary.path, summary.entries
+                );
+            }
+        }
+        Command::IndexRefresh { json } => {
+            let summary = refresh_index(&backlog_dir)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&summary)?);
+            } else {
+                println!(
+                    "Index refresh -> {} ({} entries)",
+                    summary.path, summary.entries
+                );
+            }
+        }
+        Command::IndexVerify { json } => {
+            let report = verify_index(&backlog_dir)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if report.ok {
+                println!("Index ok");
+            } else {
+                if !report.missing.is_empty() {
+                    println!("Missing: {}", report.missing.len());
+                }
+                if !report.stale.is_empty() {
+                    println!("Stale: {}", report.stale.len());
+                }
+                if !report.extra.is_empty() {
+                    println!("Extra: {}", report.extra.len());
+                }
+                std::process::exit(1);
+            }
+        }
+        Command::Checkpoint {
+            project,
+            id,
+            audit_limit,
+            json,
+        } => {
+            let options = CheckpointOptions {
+                project_id: project.clone(),
+                checkpoint_id: id.clone(),
+                audit_limit: audit_limit.unwrap_or(20),
+            };
+            let result = write_checkpoint(&backlog_dir, &tasks, &options)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&result.snapshot)?);
+            } else {
+                println!("Checkpoint: {}", result.snapshot.checkpoint_id);
+                println!("JSON: {}", result.json_path.display());
+                println!("Markdown: {}", result.markdown_path.display());
+            }
+        }
+        Command::Resume { project, id, json } => {
+            let repo_root = repo_root_from_backlog(&backlog_dir);
+            let project_id = resolve_project_id(&repo_root, &tasks, project.as_deref());
+            let summary = resume_summary(&repo_root, &project_id, id.as_deref())?;
+            match summary {
+                Some(summary) => {
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&summary.snapshot)?);
+                    } else {
+                        println!("{}", render_resume(&summary));
+                    }
+                }
+                None => {
+                    println!("No checkpoint found");
+                }
+            }
+        }
+        Command::WorkingSet {
+            project,
+            tasks: task_list,
+            note,
+            json,
+        } => {
+            let repo_root = repo_root_from_backlog(&backlog_dir);
+            let project_id = resolve_project_id(&repo_root, &tasks, project.as_deref());
+            let selected = match task_list.as_deref() {
+                Some(list) if !list.trim().is_empty() => {
+                    let ids = split_csv(list);
+                    select_tasks_by_ids(&tasks, &ids)
+                }
+                _ => tasks
+                    .iter()
+                    .filter(|task| task.status.eq_ignore_ascii_case("in progress"))
+                    .collect(),
+            };
+            let summaries: Vec<_> = selected.iter().map(|task| task_summary(task)).collect();
+            let path = write_working_set(&repo_root, &project_id, &summaries, note.as_deref())?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({"path": path}))?
+                );
+            } else {
+                println!("{}", path.display());
+            }
+        }
+        Command::SessionJournal {
+            project,
+            task,
+            next,
+            note,
+            json,
+        } => {
+            let repo_root = repo_root_from_backlog(&backlog_dir);
+            let project_id = resolve_project_id(&repo_root, &tasks, project.as_deref());
+            let path = append_session_journal(
+                &repo_root,
+                &project_id,
+                task.as_deref(),
+                next.as_deref(),
+                note.as_deref(),
+            )?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({"path": path}))?
+                );
+            } else {
+                println!("{}", path.display());
+            }
+        }
+        Command::Session { command } => {
+            let home = resolve_workmesh_home()?;
+            match command {
+                SessionCommand::Save {
+                    objective,
+                    cwd,
+                    project,
+                    tasks: task_list,
+                    notes,
+                    json,
+                } => {
+                    let cwd = cwd.unwrap_or(std::env::current_dir()?);
+                    let cwd_str = cwd.to_string_lossy().to_string();
+
+                    let tasks_override = task_list
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                        .map(split_csv);
+
+                    let mut repo_root: Option<String> = None;
+                    let mut project_id: Option<String> = project.clone();
+                    let mut epic_id: Option<String> = None;
+                    let mut working_set: Vec<String> = tasks_override.unwrap_or_default();
+                    let mut git: Option<GitSnapshot> = None;
+                    let mut checkpoint: Option<CheckpointRef> = None;
+                    let mut recent_changes: Option<workmesh_core::global_sessions::RecentChanges> =
+                        None;
+                    let mut registry_repo_root_for_link: Option<PathBuf> = None;
+                    let mut checkout_repo_root_for_link: Option<PathBuf> = None;
+                    let mut active_workstream_id: Option<String> = None;
+                    let mut workstream_context_snapshot: Option<WorkstreamContextSnapshot> = None;
+
+                    if let Ok(backlog_dir) = locate_backlog_dir(&cwd) {
+                        let rr = repo_root_from_backlog(&backlog_dir);
+                        repo_root = Some(rr.to_string_lossy().to_string());
+                        let repo_tasks = load_tasks(&backlog_dir);
+                        let context_state = load_context_state(&backlog_dir);
+                        active_workstream_id = context_state
+                            .as_ref()
+                            .and_then(|state| state.workstream_id.clone())
+                            .filter(|value| !value.trim().is_empty());
+                        if active_workstream_id.is_some() {
+                            registry_repo_root_for_link = Some(resolve_repo_root_for_registry(&rr));
+                            checkout_repo_root_for_link = Some(rr.clone());
+                            workstream_context_snapshot = context_state
+                                .as_ref()
+                                .map(WorkstreamContextSnapshot::from_context_state);
+                        }
+                        epic_id = context_state
+                            .as_ref()
+                            .and_then(|c| c.scope.epic_id.clone())
+                            .or_else(|| {
+                                best_effort_git_branch(&rr)
+                                    .and_then(|b| extract_task_id_from_branch(&b))
+                            });
+
+                        if project_id.is_none() {
+                            project_id = context_state
+                                .as_ref()
+                                .and_then(|c| c.project_id.clone())
+                                .or_else(|| {
+                                    Some(resolve_project_id(&rr, &repo_tasks, project.as_deref()))
+                                });
+                        }
+
+                        if working_set.is_empty() {
+                            working_set = repo_tasks
+                                .iter()
+                                .filter(|task| {
+                                    task.status.eq_ignore_ascii_case("in progress")
+                                        || is_lease_active(task)
+                                })
+                                .map(|task| task.id.clone())
+                                .collect();
+                        }
+
+                        git = Some(best_effort_git_snapshot(&rr));
+                        if let Some(pid) = project_id.as_deref() {
+                            if let Ok(Some(summary)) = resume_summary(&rr, pid, None) {
+                                checkpoint = Some(CheckpointRef {
+                                    path: summary.checkpoint_path.to_string_lossy().to_string(),
+                                    timestamp: Some(summary.snapshot.generated_at.clone()),
+                                });
+                                recent_changes =
+                                    Some(workmesh_core::global_sessions::RecentChanges {
+                                        dirs: summary.snapshot.top_level_dirs.clone(),
+                                        files: summary.snapshot.changed_files.clone(),
+                                    });
+                            }
+                        }
+                    }
+
+                    let now = now_rfc3339();
+                    let worktree = best_effort_worktree_binding(&home, &cwd, repo_root.as_deref());
+                    let truth_refs = if let Ok(backlog_dir) = locate_backlog_dir(&cwd) {
+                        truth_refs_for_scope(
+                            &backlog_dir,
+                            project_id.as_deref(),
+                            epic_id.as_deref(),
+                            worktree.as_ref().map(|binding| binding.path.as_str()),
+                            10,
+                        )
+                    } else {
+                        Vec::new()
+                    };
+                    let session = AgentSession {
+                        id: new_session_id(),
+                        created_at: now.clone(),
+                        updated_at: now,
+                        cwd: cwd_str,
+                        repo_root,
+                        project_id,
+                        epic_id,
+                        objective,
+                        working_set,
+                        notes,
+                        git,
+                        checkpoint,
+                        recent_changes,
+                        handoff: None,
+                        worktree,
+                        truth_refs,
+                    };
+
+                    append_session_saved(&home, session.clone())?;
+                    set_current_session(&home, &session.id)?;
+
+                    if let (
+                        Some(registry_repo_root),
+                        Some(checkout_repo_root),
+                        Some(workstream_id),
+                        Some(snapshot),
+                    ) = (
+                        registry_repo_root_for_link.as_ref(),
+                        checkout_repo_root_for_link.as_ref(),
+                        active_workstream_id.as_deref(),
+                        workstream_context_snapshot.as_ref(),
+                    ) {
+                        let branch = current_worktree_branch(checkout_repo_root);
+                        let record = set_worktree_attached_session_id(
+                            &home,
+                            registry_repo_root,
+                            checkout_repo_root,
+                            branch.clone(),
+                            Some(session.id.clone()),
+                        )?;
+                        let binding = WorktreeBinding {
+                            id: Some(record.id.clone()),
+                            path: record.path.clone(),
+                            branch: record.branch.clone().or(branch),
+                            repo_root: Some(record.repo_root.clone()),
+                        };
+
+                        let _ = update_workstream_for_repo_by_id(
+                            &home,
+                            registry_repo_root,
+                            workstream_id,
+                            |record| {
+                                record.session_id = Some(session.id.clone());
+                                record.worktree = Some(binding.clone());
+                                record.context = Some(snapshot.clone());
+                                record.truth_refs = session.truth_refs.clone();
+                            },
+                        )?;
+                    }
+
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&session)?);
+                    } else {
+                        println!("Saved session {}", session.id);
+                    }
+                }
+                SessionCommand::List { limit, json } => {
+                    let mut sessions = load_sessions_latest_fast(&home)?;
+                    if let Some(limit) = limit {
+                        sessions.truncate(limit);
+                    }
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&sessions)?);
+                    } else if sessions.is_empty() {
+                        println!("(no sessions)");
+                    } else {
+                        for session in sessions {
+                            println!("{}", render_session_line(&session));
+                        }
+                    }
+                }
+                SessionCommand::Show { session_id, json } => {
+                    let sessions = load_sessions_latest_fast(&home)?;
+                    let session = sessions
+                        .into_iter()
+                        .find(|s| s.id == session_id)
+                        .unwrap_or_else(|| die(&format!("Session not found: {}", session_id)));
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&session)?);
+                    } else {
+                        println!("{}", render_session_detail(&session));
+                    }
+                }
+                SessionCommand::Resume { session_id, json } => {
+                    let id = session_id
+                        .or_else(|| read_current_session_id(&home))
+                        .unwrap_or_else(|| {
+                            die("No session id provided and no current session pointer found")
+                        });
+                    let sessions = load_sessions_latest_fast(&home)?;
+                    let session = sessions
+                        .into_iter()
+                        .find(|s| s.id == id)
+                        .unwrap_or_else(|| die(&format!("Session not found: {}", id)));
+                    let script = resume_script(&session);
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(
+                                &serde_json::json!({ "session": session, "resume_script": script })
+                            )?
+                        );
+                    } else {
+                        println!("{}", render_session_detail(&session));
+                        println!();
+                        println!("Suggested resume:");
+                        for line in script {
+                            println!("{}", line);
+                        }
+                    }
+                }
+                SessionCommand::IndexRebuild { json } => {
+                    let summary = rebuild_sessions_index(&home)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&summary)?);
+                    } else {
+                        println!("Indexed {} sessions -> {}", summary.indexed, summary.path);
+                    }
+                }
+                SessionCommand::IndexRefresh { json } => {
+                    let summary = refresh_sessions_index(&home)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&summary)?);
+                    } else {
+                        println!("Indexed {} sessions -> {}", summary.indexed, summary.path);
+                    }
+                }
+                SessionCommand::IndexVerify { json } => {
+                    let report = verify_sessions_index(&home)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else if report.ok {
+                        println!("OK");
+                    } else {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    }
+                }
+            }
+        }
+        Command::Truth { command } => match command {
+            TruthCommand::Propose {
+                id,
+                title,
+                statement,
+                rationale,
+                constraints,
+                tags,
+                project,
+                epic,
+                feature,
+                workstream_id,
+                session_id,
+                worktree_id,
+                worktree_path,
+                current,
+                actor,
+                json,
+            } => {
+                let repo_root = repo_root_from_backlog(&backlog_dir);
+                let inferred = load_context_state(&backlog_dir);
+                let inferred_project = inferred
+                    .as_ref()
+                    .and_then(|state| state.project_id.clone())
+                    .or_else(|| infer_project_id(&repo_root));
+                let inferred_epic = inferred
+                    .as_ref()
+                    .and_then(|state| state.scope.epic_id.clone());
+                let inferred_workstream_id = inferred
+                    .as_ref()
+                    .and_then(|state| state.workstream_id.clone())
+                    .filter(|value| !value.trim().is_empty());
+
+                let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+                let worktree_binding = resolve_workmesh_home().ok().and_then(|home| {
+                    best_effort_worktree_binding(&home, &cwd, Some(&repo_root.to_string_lossy()))
+                });
+                let resolved_worktree_path = worktree_path
+                    .as_deref()
+                    .map(normalize_path_string)
+                    .or_else(|| {
+                        worktree_binding
+                            .as_ref()
+                            .map(|binding| binding.path.clone())
+                    });
+                let resolved_session_id = session_id.or_else(|| {
+                    resolve_workmesh_home()
+                        .ok()
+                        .and_then(|home| read_current_session_id(&home))
+                });
+                let resolved_worktree_id = worktree_id.or_else(|| {
+                    worktree_binding
+                        .as_ref()
+                        .and_then(|binding| binding.id.clone())
+                });
+                let resolved_epic = epic.or(inferred_epic);
+                let resolved_workstream_id = workstream_id.or(inferred_workstream_id.clone());
+                let resolved_feature = if feature.is_some() {
+                    feature
+                } else if current {
+                    resolved_workstream_id
+                        .clone()
+                        .or_else(|| resolved_epic.clone())
+                } else {
+                    resolved_epic
+                        .clone()
+                        .or_else(|| resolved_workstream_id.clone())
+                };
+
+                let record = propose_truth(
+                    &backlog_dir,
+                    TruthProposeInput {
+                        id,
+                        title,
+                        statement,
+                        rationale,
+                        constraints: split_csv(&constraints),
+                        tags: split_csv(&tags),
+                        context: CoreTruthContext {
+                            project_id: project.or(inferred_project),
+                            epic_id: resolved_epic,
+                            feature: resolved_feature,
+                            workstream_id: resolved_workstream_id,
+                            session_id: resolved_session_id,
+                            worktree_id: resolved_worktree_id,
+                            worktree_path: resolved_worktree_path,
+                        },
+                        actor: actor.or_else(|| Some("cli".to_string())),
+                    },
+                )?;
+                audit_event(
+                    &backlog_dir,
+                    "truth_propose",
+                    None,
+                    serde_json::json!({ "truth_id": record.id }),
+                )?;
+                maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&record)?);
+                } else {
+                    println!("{}", render_truth_line(&record));
+                }
+            }
+            TruthCommand::Accept {
+                truth_id,
+                note,
+                actor,
+                json,
+            } => {
+                let record = accept_truth(
+                    &backlog_dir,
+                    TruthTransitionInput {
+                        truth_id,
+                        note,
+                        actor: actor.or_else(|| Some("cli".to_string())),
+                    },
+                )?;
+                audit_event(
+                    &backlog_dir,
+                    "truth_accept",
+                    None,
+                    serde_json::json!({ "truth_id": record.id }),
+                )?;
+                maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&record)?);
+                } else {
+                    println!("{}", render_truth_line(&record));
+                }
+            }
+            TruthCommand::Reject {
+                truth_id,
+                note,
+                actor,
+                json,
+            } => {
+                let record = reject_truth(
+                    &backlog_dir,
+                    TruthTransitionInput {
+                        truth_id,
+                        note,
+                        actor: actor.or_else(|| Some("cli".to_string())),
+                    },
+                )?;
+                audit_event(
+                    &backlog_dir,
+                    "truth_reject",
+                    None,
+                    serde_json::json!({ "truth_id": record.id }),
+                )?;
+                maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&record)?);
+                } else {
+                    println!("{}", render_truth_line(&record));
+                }
+            }
+            TruthCommand::Supersede {
+                truth_id,
+                by,
+                reason,
+                actor,
+                json,
+            } => {
+                let record = supersede_truth(
+                    &backlog_dir,
+                    TruthSupersedeInput {
+                        truth_id,
+                        by_truth_id: by,
+                        reason,
+                        actor: actor.or_else(|| Some("cli".to_string())),
+                    },
+                )?;
+                audit_event(
+                    &backlog_dir,
+                    "truth_supersede",
+                    None,
+                    serde_json::json!({
+                        "truth_id": record.id,
+                        "superseded_by": record.superseded_by,
+                    }),
+                )?;
+                maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&record)?);
+                } else {
+                    println!("{}", render_truth_line(&record));
+                }
+            }
+            TruthCommand::Show { truth_id, json: _ } => {
+                let Some(record) = show_truth(&backlog_dir, &truth_id)? else {
+                    die(&format!("Truth record not found: {}", truth_id));
+                };
+                println!("{}", serde_json::to_string_pretty(&record)?);
+            }
+            TruthCommand::List {
+                state,
+                project,
+                epic,
+                feature,
+                workstream_id,
+                session_id,
+                worktree_id,
+                worktree_path,
+                tag,
+                limit,
+                json,
+            } => {
+                let states = parse_truth_states(state.as_slice())?;
+                let records = list_truths(
+                    &backlog_dir,
+                    &TruthQuery {
+                        states,
+                        project_id: project,
+                        epic_id: epic,
+                        feature,
+                        workstream_id,
+                        session_id,
+                        worktree_id,
+                        worktree_path: worktree_path.as_deref().map(normalize_path_string),
+                        tags: split_list(tag.as_slice()),
+                        limit,
+                    },
+                )?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&records)?);
+                } else if records.is_empty() {
+                    println!("(no truth records)");
+                } else {
+                    for record in records {
+                        println!("{}", render_truth_line(&record));
+                    }
+                }
+            }
+            TruthCommand::Validate { json } => {
+                let report = validate_truth_store(&backlog_dir)?;
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&report)?);
+                } else if report.ok {
+                    println!(
+                        "truth: ok (events={} records={})",
+                        report.event_count, report.record_count
+                    );
+                } else {
+                    println!("truth: invalid");
+                    for issue in &report.malformed_events {
+                        println!("- malformed_event: {}", issue);
+                    }
+                    for issue in &report.transition_errors {
+                        println!("- transition_error: {}", issue);
+                    }
+                    for issue in &report.projection_mismatches {
+                        println!("- projection_mismatch: {}", issue);
+                    }
+                    std::process::exit(1);
+                }
+            }
+            TruthCommand::Migrate { command } => match command {
+                TruthMigrateCommand::Audit { json } => {
+                    let report = truth_migration_audit(&backlog_dir)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&report)?);
+                    } else {
+                        println!("legacy candidates: {}", report.candidates.len());
+                        for warning in report.warnings {
+                            println!("warning: {}", warning);
+                        }
+                    }
+                }
+                TruthMigrateCommand::Plan { json } => {
+                    let audit = truth_migration_audit(&backlog_dir)?;
+                    let plan = truth_migration_plan(&backlog_dir, &audit)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&plan)?);
+                    } else {
+                        println!("to_create: {}", plan.to_create.len());
+                        println!("skipped: {}", plan.skipped.len());
+                        for warning in plan.warnings {
+                            println!("warning: {}", warning);
+                        }
+                    }
+                }
+                TruthMigrateCommand::Apply { apply, json } => {
+                    let audit = truth_migration_audit(&backlog_dir)?;
+                    let plan = truth_migration_plan(&backlog_dir, &audit)?;
+                    let result = apply_truth_migration(&backlog_dir, &plan, !apply)?;
+                    if apply {
+                        audit_event(
+                            &backlog_dir,
+                            "truth_migrate_apply",
+                            None,
+                            serde_json::json!({ "created": result.created_ids }),
+                        )?;
+                        maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+                    }
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&result)?);
+                    } else if apply {
+                        println!("created: {}", result.created_ids.len());
+                        if !result.skipped.is_empty() {
+                            println!("skipped: {}", result.skipped.len());
+                        }
+                    } else {
+                        println!(
+                            "dry-run: {} candidate(s) would be migrated",
+                            plan.to_create.len()
+                        );
+                    }
+                }
+            },
+        },
+        Command::Workstream { command } => {
+            let repo_root = repo_root_from_backlog(&backlog_dir);
+            let home = resolve_workmesh_home()?;
+            handle_workstream_command(&backlog_dir, &repo_root, &home, command)?;
+        }
+        Command::Worktree { command } => {
+            let repo_root = repo_root_from_backlog(&backlog_dir);
+            let home = resolve_workmesh_home()?;
+            handle_worktree_command(&repo_root, &home, command)?;
+        }
+        Command::Context { command } => {
+            let repo_root = repo_root_from_backlog(&backlog_dir);
+            handle_context_command(&backlog_dir, &repo_root, command)?;
+        }
+        Command::Skill { command } => {
+            let repo_root = repo_root_from_backlog(&backlog_dir);
+            match command {
+                SkillCommand::Show { name, json } => {
+                    let skill_name = name
+                        .as_deref()
+                        .map(|value| value.trim())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("workmesh");
+                    let skill = load_skill_content(Some(&repo_root), skill_name)
+                        .or_else(|| load_skill_content(None, skill_name));
+                    let Some(skill) = skill else {
+                        die(&format!("Skill not found: {}", skill_name));
+                    };
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&skill)?);
+                    } else {
+                        println!("{}", skill.content);
+                    }
+                }
+                SkillCommand::Install {
+                    name,
+                    scope,
+                    agent,
+                    force,
+                    json,
+                } => {
+                    let skill_name = name
+                        .as_deref()
+                        .map(|value| value.trim())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("workmesh");
+                    let report = install_embedded_skill_report(
+                        Some(&repo_root),
+                        scope.into(),
+                        agent.into(),
+                        skill_name,
+                        force,
+                    )?;
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "ok": true,
+                                "written": report.written,
+                                "skipped": report.skipped
+                            }))?
+                        );
+                    } else {
+                        print_install_report(report);
+                    }
+                }
+                SkillCommand::Uninstall {
+                    name,
+                    scope,
+                    agent,
+                    json,
+                } => {
+                    let skill_name = name
+                        .as_deref()
+                        .map(|value| value.trim())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("workmesh");
+                    let report = uninstall_embedded_skill_report(
+                        Some(&repo_root),
+                        scope.into(),
+                        agent.into(),
+                        skill_name,
+                    )?;
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "ok": true,
+                                "removed": report.removed,
+                                "missing": report.missing
+                            }))?
+                        );
+                    } else {
+                        print_uninstall_report(report);
+                    }
+                }
+                SkillCommand::InstallGlobal { name, force, json } => {
+                    let skill_name = name
+                        .as_deref()
+                        .map(|value| value.trim())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("workmesh");
+                    let agents = detect_user_agents().unwrap_or_default();
+                    let report = install_embedded_skill_global_auto_report(skill_name, force)?;
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "ok": true,
+                                "detected_agents": agents,
+                                "written": report.written,
+                                "skipped": report.skipped
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "Detected agents: {}",
+                            agents
+                                .iter()
+                                .map(|a| format!("{:?}", a))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        print_install_report(report);
+                    }
+                }
+                SkillCommand::UninstallGlobal { name, json } => {
+                    let skill_name = name
+                        .as_deref()
+                        .map(|value| value.trim())
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("workmesh");
+                    let agents = detect_user_agents().unwrap_or_default();
+                    let report = uninstall_embedded_skill_global_auto_report(skill_name)?;
+                    if json {
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&serde_json::json!({
+                                "ok": true,
+                                "detected_agents": agents,
+                                "removed": report.removed,
+                                "missing": report.missing
+                            }))?
+                        );
+                    } else {
+                        println!(
+                            "Detected agents: {}",
+                            agents
+                                .iter()
+                                .map(|a| format!("{:?}", a))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        print_uninstall_report(report);
+                    }
+                }
+            }
+        }
+        Command::CheckpointDiff { project, id, json } => {
+            let repo_root = repo_root_from_backlog(&backlog_dir);
+            let project_id = resolve_project_id(&repo_root, &tasks, project.as_deref());
+            let summary = resume_summary(&repo_root, &project_id, id.as_deref())?;
+            let Some(summary) = summary else {
+                println!("No checkpoint found");
+                return Ok(());
+            };
+            let report = diff_since_checkpoint(&repo_root, &backlog_dir, &tasks, &summary.snapshot);
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!("{}", render_diff(&report));
+            }
+        }
+        Command::SetStatus {
+            task_id,
+            status,
+            touch,
+            no_touch,
+        } => {
+            let task = find_task(&tasks, &task_id).unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            if let Err(err) = ensure_can_set_status_with_rules(&tasks, task, &status, &task_rules) {
+                die(&err);
+            }
+            let path = task.file_path.as_ref().unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            let touch = effective_touch(touch, no_touch);
+            update_task_field(path, "status", Some(status.clone().into()))?;
+            if is_done_status(&status) {
+                update_lease_fields(path, None)?;
+            }
+            if touch || is_done_status(&status) {
+                update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+            }
+            audit_event(
+                &backlog_dir,
+                "set_status",
+                Some(&task.id),
+                serde_json::json!({ "status": status.clone() }),
+            )?;
+            refresh_index_best_effort(&backlog_dir);
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+            println!("Updated {} status -> {}", task.id, status);
+        }
+        Command::Claim {
+            task_id,
+            owner,
+            minutes,
+            touch,
+            no_touch,
+        } => {
+            let task = find_task(&tasks, &task_id).unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            let path = task.file_path.as_ref().unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            let touch = effective_touch(touch, no_touch);
+            let mut assignee = task.assignee.clone();
+            if !assignee.iter().any(|value| value == &owner) {
+                assignee.push(owner.clone());
+                set_list_field(path, "assignee", assignee)?;
+            }
+            let expires_at = minutes.map(timestamp_plus_minutes);
+            let lease = Lease {
+                owner,
+                acquired_at: Some(now_timestamp()),
+                expires_at,
+            };
+            update_lease_fields(path, Some(&lease))?;
+            if touch {
+                update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+            }
+            audit_event(
+                &backlog_dir,
+                "claim",
+                Some(&task.id),
+                serde_json::json!({
+                    "owner": lease.owner.clone(),
+                    "expires_at": lease.expires_at.clone(),
+                }),
+            )?;
+            refresh_index_best_effort(&backlog_dir);
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+            println!("Claimed {} lease -> {}", task.id, lease.owner);
+        }
+        Command::Release {
+            task_id,
+            touch,
+            no_touch,
+        } => {
+            let task = find_task(&tasks, &task_id).unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            let path = task.file_path.as_ref().unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            let touch = effective_touch(touch, no_touch);
+            update_lease_fields(path, None)?;
+            if touch {
+                update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+            }
+            audit_event(
+                &backlog_dir,
+                "release",
+                Some(&task.id),
+                serde_json::json!({}),
+            )?;
+            refresh_index_best_effort(&backlog_dir);
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+            println!("Released {} lease", task.id);
+        }
+        Command::Bulk { command } => match command {
+            BulkCommand::SetStatus {
+                tasks: task_ids,
+                status,
+                touch,
+                no_touch,
+                json,
+            } => handle_bulk_set_status(
+                &backlog_dir,
+                &tasks,
+                &task_rules,
+                task_ids,
+                status,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?,
+            BulkCommand::SetField {
+                tasks: task_ids,
+                field,
+                value,
+                touch,
+                no_touch,
+                json,
+            } => handle_bulk_set_field(
+                &backlog_dir,
+                &tasks,
+                &task_rules,
+                task_ids,
+                field,
+                value,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?,
+            BulkCommand::LabelAdd {
+                tasks: task_ids,
+                label,
+                touch,
+                no_touch,
+                json,
+            } => handle_bulk_label_add(
+                &backlog_dir,
+                &tasks,
+                task_ids,
+                label,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?,
+            BulkCommand::LabelRemove {
+                tasks: task_ids,
+                label,
+                touch,
+                no_touch,
+                json,
+            } => handle_bulk_label_remove(
+                &backlog_dir,
+                &tasks,
+                task_ids,
+                label,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?,
+            BulkCommand::DepAdd {
+                tasks: task_ids,
+                dependency,
+                touch,
+                no_touch,
+                json,
+            } => handle_bulk_dep_add(
+                &backlog_dir,
+                &tasks,
+                task_ids,
+                dependency,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?,
+            BulkCommand::DepRemove {
+                tasks: task_ids,
+                dependency,
+                touch,
+                no_touch,
+                json,
+            } => handle_bulk_dep_remove(
+                &backlog_dir,
+                &tasks,
+                task_ids,
+                dependency,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?,
+            BulkCommand::Note {
+                tasks: task_ids,
+                note,
+                section,
+                touch,
+                no_touch,
+                json,
+            } => handle_bulk_note(
+                &backlog_dir,
+                &tasks,
+                task_ids,
+                note,
+                section,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?,
+        },
+        Command::BulkSetStatus {
+            tasks: task_ids,
+            status,
+            touch,
+            no_touch,
+            json,
+        } => {
+            handle_bulk_set_status(
+                &backlog_dir,
+                &tasks,
+                &task_rules,
+                task_ids,
+                status,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?;
+        }
+        Command::BulkSetField {
+            tasks: task_ids,
+            field,
+            value,
+            touch,
+            no_touch,
+            json,
+        } => {
+            handle_bulk_set_field(
+                &backlog_dir,
+                &tasks,
+                &task_rules,
+                task_ids,
+                field,
+                value,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?;
+        }
+        Command::BulkLabelAdd {
+            tasks: task_ids,
+            label,
+            touch,
+            no_touch,
+            json,
+        } => {
+            handle_bulk_label_add(
+                &backlog_dir,
+                &tasks,
+                task_ids,
+                label,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?;
+        }
+        Command::BulkLabelRemove {
+            tasks: task_ids,
+            label,
+            touch,
+            no_touch,
+            json,
+        } => {
+            handle_bulk_label_remove(
+                &backlog_dir,
+                &tasks,
+                task_ids,
+                label,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?;
+        }
+        Command::BulkDepAdd {
+            tasks: task_ids,
+            dependency,
+            touch,
+            no_touch,
+            json,
+        } => {
+            handle_bulk_dep_add(
+                &backlog_dir,
+                &tasks,
+                task_ids,
+                dependency,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?;
+        }
+        Command::BulkDepRemove {
+            tasks: task_ids,
+            dependency,
+            touch,
+            no_touch,
+            json,
+        } => {
+            handle_bulk_dep_remove(
+                &backlog_dir,
+                &tasks,
+                task_ids,
+                dependency,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?;
+        }
+        Command::BulkNote {
+            tasks: task_ids,
+            note,
+            section,
+            touch,
+            no_touch,
+            json,
+        } => {
+            handle_bulk_note(
+                &backlog_dir,
+                &tasks,
+                task_ids,
+                note,
+                section,
+                effective_touch(touch, no_touch),
+                json,
+                auto_checkpoint,
+                auto_session,
+            )?;
+        }
+        Command::SetField {
+            task_id,
+            field,
+            value,
+            touch,
+            no_touch,
+        } => {
+            let task = find_task(&tasks, &task_id).unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            if is_status_field(&field) {
+                if let Err(err) =
+                    ensure_can_set_status_with_rules(&tasks, task, &value, &task_rules)
+                {
+                    die(&err);
+                }
+            }
+            let path = task.file_path.as_ref().unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            let touch = effective_touch(touch, no_touch);
+            update_task_field_or_section(path, &field, Some(&value))?;
+            if touch {
+                update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+            }
+            audit_event(
+                &backlog_dir,
+                "set_field",
+                Some(&task.id),
+                serde_json::json!({ "field": field.clone(), "value": value.clone() }),
+            )?;
+            refresh_index_best_effort(&backlog_dir);
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+            println!("Updated {} {} -> {}", task.id, field, value);
+        }
+        Command::LabelAdd {
+            task_id,
+            label,
+            touch,
+            no_touch,
+        } => {
+            update_list_field(
+                &backlog_dir,
+                &tasks,
+                &task_id,
+                "labels",
+                &label,
+                true,
+                effective_touch(touch, no_touch),
+            )?;
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+        }
+        Command::LabelRemove {
+            task_id,
+            label,
+            touch,
+            no_touch,
+        } => {
+            update_list_field(
+                &backlog_dir,
+                &tasks,
+                &task_id,
+                "labels",
+                &label,
+                false,
+                effective_touch(touch, no_touch),
+            )?;
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+        }
+        Command::DepAdd {
+            task_id,
+            dependency,
+            touch,
+            no_touch,
+        } => {
+            update_list_field(
+                &backlog_dir,
+                &tasks,
+                &task_id,
+                "dependencies",
+                &dependency,
+                true,
+                effective_touch(touch, no_touch),
+            )?;
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+        }
+        Command::DepRemove {
+            task_id,
+            dependency,
+            touch,
+            no_touch,
+        } => {
+            update_list_field(
+                &backlog_dir,
+                &tasks,
+                &task_id,
+                "dependencies",
+                &dependency,
+                false,
+                effective_touch(touch, no_touch),
+            )?;
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+        }
+        Command::Note {
+            task_id,
+            note,
+            section,
+            touch,
+            no_touch,
+        } => {
+            let task = find_task(&tasks, &task_id).unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            let path = task.file_path.as_ref().unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            let touch = effective_touch(touch, no_touch);
+            let new_body = append_note(&task.body, &note, section.as_str());
+            update_body(path, &new_body)?;
+            if touch {
+                update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+            }
+            audit_event(
+                &backlog_dir,
+                "note",
+                Some(&task.id),
+                serde_json::json!({ "section": section.as_str(), "note": note }),
+            )?;
+            refresh_index_best_effort(&backlog_dir);
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+            println!("Added note to {}", task.id);
+        }
+        Command::SetBody {
+            task_id,
+            text,
+            file,
+            touch,
+            no_touch,
+        } => {
+            let task = find_task(&tasks, &task_id).unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            let path = task.file_path.as_ref().unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            let touch = effective_touch(touch, no_touch);
+            let content = read_content(text.as_deref(), file.as_deref())?;
+            update_body(path, &content)?;
+            if touch {
+                update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+            }
+            audit_event(
+                &backlog_dir,
+                "set_body",
+                Some(&task.id),
+                serde_json::json!({ "length": content.len() }),
+            )?;
+            refresh_index_best_effort(&backlog_dir);
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+            println!("Updated body for {}", task.id);
+        }
+        Command::SetSection {
+            task_id,
+            section,
+            text,
+            file,
+            touch,
+            no_touch,
+        } => {
+            let task = find_task(&tasks, &task_id).unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            let path = task.file_path.as_ref().unwrap_or_else(|| {
+                die(&format!("Task not found: {}", task_id));
+            });
+            let touch = effective_touch(touch, no_touch);
+            let content = read_content(text.as_deref(), file.as_deref())?;
+            let new_body = replace_section(&task.body, &section, &content);
+            update_body(path, &new_body)?;
+            if touch {
+                update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+            }
+            audit_event(
+                &backlog_dir,
+                "set_section",
+                Some(&task.id),
+                serde_json::json!({ "section": section.clone(), "length": content.len() }),
+            )?;
+            refresh_index_best_effort(&backlog_dir);
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+            println!("Updated section {} for {}", section, task.id);
+        }
+        Command::Add {
+            id,
+            title,
+            description,
+            acceptance_criteria,
+            definition_of_done,
+            draft,
+            status,
+            priority,
+            phase,
+            labels,
+            dependencies,
+            assignee,
+            json,
+        } => {
+            let tasks_dir = tasks_dir_for_root(&backlog_dir);
+            let task_id = match id {
+                Some(value) => value,
+                None => {
+                    let repo_root = repo_root_from_backlog(&backlog_dir);
+                    let branch = core_git_branch(&repo_root).unwrap_or_else(|| "work".to_string());
+                    let initiative = ensure_branch_initiative(&repo_root, &branch)?;
+                    next_namespaced_task_id(&tasks, &initiative)
+                }
+            };
+            let labels = split_csv(&labels);
+            let dependencies = split_csv(&dependencies);
+            let assignee = split_csv(&assignee);
+            let sections =
+                build_task_sections(description, acceptance_criteria, definition_of_done);
+            let effective_status =
+                validate_task_creation_with_rules(&status, draft, &sections, &task_rules)
+                    .unwrap_or_else(|err| die(&err));
+            let path = create_task_file_with_sections(
+                &tasks_dir,
+                &task_id,
+                &title,
+                &effective_status,
+                &priority,
+                &phase,
+                &dependencies,
+                &labels,
+                &assignee,
+                &sections,
+            )?;
+            audit_event(
+                &backlog_dir,
+                "add_task",
+                Some(&task_id),
+                serde_json::json!({ "title": title, "status": effective_status }),
+            )?;
+            refresh_index_best_effort(&backlog_dir);
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+            if json {
+                let payload = serde_json::json!({"path": path, "id": task_id});
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("Created {} -> {}", task_id, path.display());
+            }
+        }
+        Command::AddDiscovered {
+            from,
+            id,
+            title,
+            description,
+            acceptance_criteria,
+            definition_of_done,
+            draft,
+            status,
+            priority,
+            phase,
+            labels,
+            dependencies,
+            assignee,
+            json,
+        } => {
+            let tasks_dir = tasks_dir_for_root(&backlog_dir);
+            let task_id = match id {
+                Some(value) => value,
+                None => {
+                    let repo_root = repo_root_from_backlog(&backlog_dir);
+                    let branch = core_git_branch(&repo_root).unwrap_or_else(|| "work".to_string());
+                    let initiative = ensure_branch_initiative(&repo_root, &branch)?;
+                    next_namespaced_task_id(&tasks, &initiative)
+                }
+            };
+            let labels = split_csv(&labels);
+            let dependencies = split_csv(&dependencies);
+            let assignee = split_csv(&assignee);
+            let sections =
+                build_task_sections(description, acceptance_criteria, definition_of_done);
+            let effective_status =
+                validate_task_creation_with_rules(&status, draft, &sections, &task_rules)
+                    .unwrap_or_else(|err| die(&err));
+            let path = create_task_file_with_sections(
+                &tasks_dir,
+                &task_id,
+                &title,
+                &effective_status,
+                &priority,
+                &phase,
+                &dependencies,
+                &labels,
+                &assignee,
+                &sections,
+            )?;
+            update_relationship_field(
+                &path,
+                "discovered_from",
+                Some(FieldValue::List(vec![from.clone()])),
+            )?;
+            let inferred_parent = inferred_parent_for_discovered(&tasks, &from);
+            if !inferred_parent.is_empty() {
+                update_relationship_field(
+                    &path,
+                    "parent",
+                    Some(FieldValue::List(inferred_parent)),
+                )?;
+            }
+            audit_event(
+                &backlog_dir,
+                "add_discovered",
+                Some(&task_id),
+                serde_json::json!({ "from": from, "title": title, "status": effective_status }),
+            )?;
+            refresh_index_best_effort(&backlog_dir);
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+            if json {
+                let payload = serde_json::json!({"path": path, "id": task_id});
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("Created {} -> {}", task_id, path.display());
+            }
+        }
+        Command::ProjectInit { project_id, name } => {
+            let repo_root = repo_root_from_backlog(&backlog_dir);
+            let path = ensure_project_docs(&repo_root, &project_id, name.as_deref())?;
+            audit_event(
+                &backlog_dir,
+                "project_init",
+                None,
+                serde_json::json!({ "project_id": project_id }),
+            )?;
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+            println!("{}", path.display());
+        }
+        Command::Validate { json } => {
+            let report = validate_tasks_with_rules(&tasks, Some(&backlog_dir), &task_rules);
+            let truth_report = validate_truth_store(&backlog_dir).ok();
+            if json {
+                let payload = serde_json::json!({
+                    "tasks": report,
+                    "truth": truth_report,
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                for err in &report.errors {
+                    println!("ERROR: {}", err);
+                }
+                for warn in &report.warnings {
+                    println!("WARN: {}", warn);
+                }
+                if let Some(truth_report) = truth_report.as_ref() {
+                    if truth_report.ok {
+                        println!(
+                            "TRUTH: OK (events={} records={})",
+                            truth_report.event_count, truth_report.record_count
+                        );
+                    } else {
+                        for issue in &truth_report.malformed_events {
+                            println!("TRUTH ERROR: malformed_event: {}", issue);
+                        }
+                        for issue in &truth_report.transition_errors {
+                            println!("TRUTH ERROR: transition_error: {}", issue);
+                        }
+                        for issue in &truth_report.projection_mismatches {
+                            println!("TRUTH ERROR: projection_mismatch: {}", issue);
+                        }
+                    }
+                }
+                if !report.errors.is_empty()
+                    || truth_report.as_ref().map(|r| !r.ok).unwrap_or(false)
+                {
+                    std::process::exit(1);
+                }
+            }
+        }
+        Command::BestPractices => {
+            println!("{}", best_practices_text());
+        }
+        Command::Render { .. } => {
+            unreachable!("render handled before backlog resolution");
+        }
+        Command::Gantt { start, zoom } => {
+            let text = plantuml_gantt(&tasks, start.as_deref(), None, zoom, None, true);
+            print!("{}", text);
+        }
+        Command::GanttFile {
+            start,
+            zoom,
+            output,
+        } => {
+            let text = plantuml_gantt(&tasks, start.as_deref(), None, zoom, None, true);
+            let path = write_text_file(&output, &text)?;
+            println!("{}", path.display());
+        }
+        Command::GanttSvg {
+            start,
+            zoom,
+            output,
+            plantuml_cmd,
+            plantuml_jar,
+        } => {
+            let text = plantuml_gantt(&tasks, start.as_deref(), None, zoom, None, true);
+            let cmd = match plantuml_cmd {
+                Some(cmd) => {
+                    // `shell_words` is Unix-shell oriented and treats backslashes as escapes,
+                    // which breaks Windows strings like `cmd /C C:\path\plantuml.cmd`.
+                    // On Windows, keep parsing simple and predictable: whitespace-split.
+                    if cfg!(windows) {
+                        Some(
+                            cmd.split_whitespace()
+                                .map(|part| part.to_string())
+                                .collect(),
+                        )
+                    } else {
+                        Some(shell_words::split(&cmd).map_err(anyhow::Error::msg)?)
+                    }
+                }
+                None => None,
+            };
+            let svg =
+                render_plantuml_svg(&text, cmd, plantuml_jar.as_deref(), None).map_err(|err| {
+                    match err {
+                        PlantumlRenderError::RenderFailed(msg) => anyhow::Error::msg(msg),
+                        other => anyhow::Error::msg(other.to_string()),
+                    }
+                })?;
+            if let Some(output) = output {
+                let path = write_text_file(&output, &svg)?;
+                println!("{}", path.display());
+            } else {
+                print!("{}", svg);
+            }
+        }
+        Command::Quickstart { .. } => {
+            unreachable!("quickstart handled before backlog resolution");
+        }
+        Command::Bootstrap { .. } => {
+            unreachable!("bootstrap handled before backlog resolution");
+        }
+        Command::Install { .. } => {
+            unreachable!("install handled before backlog resolution");
+        }
+        Command::Uninstall { .. } => {
+            unreachable!("uninstall handled before backlog resolution");
+        }
+        Command::Config { .. } => {
+            unreachable!("config handled before backlog resolution");
+        }
+        Command::Doctor { .. } => {
+            unreachable!("doctor handled before backlog resolution");
+        }
+        Command::Migrate { .. } => {
+            unreachable!("migrate handled before backlog resolution");
+        }
+        Command::Archive {
+            task_id,
+            task_ids,
+            before,
+            status,
+            json,
+        } => {
+            let before_date = parse_before_date(&before)?;
+            let statuses = split_list(status.as_slice());
+            let requested_task_ids = task_id
+                .iter()
+                .chain(task_ids.iter())
+                .cloned()
+                .collect::<Vec<_>>();
+            let explicit_task_ids = split_list(requested_task_ids.as_slice());
+            let result = archive_tasks(
+                &backlog_dir,
+                &tasks,
+                &ArchiveOptions {
+                    before: before_date,
+                    statuses: statuses.clone(),
+                    task_ids: explicit_task_ids.clone(),
+                },
+            )?;
+            refresh_index_best_effort(&backlog_dir);
+            maybe_auto_checkpoint(&backlog_dir, auto_checkpoint, auto_session);
+            if json {
+                let payload = serde_json::json!({
+                    "archived": result.archived,
+                    "skipped": result.skipped,
+                    "archive_dir": result.archive_dir,
+                    "status_filter": if statuses.is_empty() {
+                        workmesh_core::archive::default_archive_statuses()
+                            .iter()
+                            .map(|value| value.to_string())
+                            .collect::<Vec<_>>()
+                    } else {
+                        statuses
+                    },
+                    "task_ids": explicit_task_ids
+                });
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("Archived {} tasks", result.archived.len());
+                if !result.skipped.is_empty() {
+                    println!("Skipped: {}", result.skipped.join(", "));
+                }
+                if !explicit_task_ids.is_empty() {
+                    println!("Task IDs: {}", explicit_task_ids.join(", "));
+                } else if status.is_empty() {
+                    println!(
+                        "Status filter: {}",
+                        workmesh_core::archive::default_archive_statuses().join(", ")
+                    );
+                } else {
+                    println!(
+                        "Status filter: {}",
+                        split_list(status.as_slice()).join(", ")
+                    );
+                }
+                println!("Archive: {}", result.archive_dir.display());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn to_list(values: &[String]) -> Option<Vec<String>> {
+    let items = split_list(values);
+    if items.is_empty() {
+        None
+    } else {
+        Some(items)
+    }
+}
+
+fn split_list(values: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    for value in values {
+        result.extend(split_csv(value));
+    }
+    result
+}
+
+fn split_csv(value: &str) -> Vec<String> {
+    if value.trim().is_empty() {
+        return Vec::new();
+    }
+    value
+        .split(',')
+        .map(|val| val.trim().to_string())
+        .filter(|val| !val.is_empty())
+        .collect()
+}
+
+fn build_task_sections(
+    description: Option<String>,
+    acceptance_criteria: Option<String>,
+    definition_of_done: Option<String>,
+) -> TaskSectionContent {
+    TaskSectionContent {
+        description: description.unwrap_or_default(),
+        acceptance_criteria: acceptance_criteria.unwrap_or_default(),
+        definition_of_done: definition_of_done.unwrap_or_default(),
+    }
+}
+
+fn find_task<'a>(tasks: &'a [Task], task_id: &str) -> Option<&'a Task> {
+    let target = task_id.to_lowercase();
+    tasks.iter().find(|task| task.id.to_lowercase() == target)
+}
+
+fn select_tasks_by_ids<'a>(tasks: &'a [Task], ids: &[String]) -> Vec<&'a Task> {
+    let mut selected = Vec::new();
+    for id in ids {
+        if let Some(task) = find_task(tasks, id) {
+            selected.push(task);
+        }
+    }
+    selected
+}
+
+fn select_tasks_with_missing<'a>(
+    tasks: &'a [Task],
+    ids: &[String],
+) -> (Vec<&'a Task>, Vec<String>) {
+    let mut selected = Vec::new();
+    let mut missing = Vec::new();
+    for id in ids {
+        if let Some(task) = find_task(tasks, id) {
+            selected.push(task);
+        } else {
+            missing.push(id.to_string());
+        }
+    }
+    (selected, missing)
+}
+
+fn normalize_task_ids(ids: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for id in ids {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let key = trimmed.to_lowercase();
+        if seen.insert(key) {
+            out.push(trimmed.to_string());
+        }
+    }
+    out
+}
+
+fn emit_bulk_result(updated: &[String], missing: &[String], json: bool) {
+    let payload = serde_json::json!({
+        "ok": missing.is_empty(),
+        "updated": updated,
+        "missing": missing,
+    });
+    if json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_default()
+        );
+    } else {
+        println!("Updated {} tasks", updated.len());
+        if !missing.is_empty() {
+            println!("Missing tasks: {}", missing.join(", "));
+        }
+    }
+    if !missing.is_empty() {
+        std::process::exit(1);
+    }
+}
+
+fn parse_before_date(value: &str) -> Result<NaiveDate> {
+    let trimmed = value.trim();
+    if let Ok(date) = NaiveDate::parse_from_str(trimmed, "%Y-%m-%d") {
+        return Ok(date);
+    }
+    if let Some(days) = trimmed.strip_suffix('d') {
+        if let Ok(days) = days.parse::<i64>() {
+            let date = Local::now().date_naive() - Duration::days(days);
+            return Ok(date);
+        }
+    }
+    Err(anyhow::anyhow!("Invalid date format: {}", value))
+}
+
+fn prompts_disabled() -> bool {
+    // CI-friendly: some environments report stdin as a terminal but still cannot read input.
+    // This opt-out keeps commands non-interactive and deterministic.
+    std::env::var("WORKMESH_NO_PROMPT")
+        .ok()
+        .map(|value| {
+            let v = value.trim().to_lowercase();
+            v == "1" || v == "true" || v == "yes" || v == "y"
+        })
+        .unwrap_or(false)
+}
+
+fn maybe_prompt_migration(resolution: &BacklogResolution) -> Result<PathBuf> {
+    if !resolution.layout.is_legacy() {
+        return Ok(resolution.state_root.clone());
+    }
+    if resolution
+        .config
+        .as_ref()
+        .and_then(|cfg| cfg.do_not_migrate)
+        .unwrap_or(false)
+    {
+        return Ok(resolution.state_root.clone());
+    }
+    if prompts_disabled() || !io::stdin().is_terminal() {
+        eprintln!(
+            "Legacy repo layout detected at {}. Run `workmesh --root . migrate --to split` to move to tasks/ + .workmesh/.",
+            resolution.state_root.display()
+        );
+        return Ok(resolution.state_root.clone());
+    }
+    if confirm_migration(&resolution.state_root)? {
+        let result = migrate_backlog(resolution, "split")?;
+        let _ = update_do_not_migrate(&resolution.repo_root, false);
+        return Ok(result.to);
+    }
+    let _ = update_do_not_migrate(&resolution.repo_root, true);
+    Ok(resolution.state_root.clone())
+}
+
+fn confirm_migration(path: &Path) -> Result<bool> {
+    eprint!(
+        "Legacy repo layout found at {}. Migrate to tasks/ + .workmesh/? [y/N] ",
+        path.display()
+    );
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let value = input.trim().to_lowercase();
+    Ok(matches!(value.as_str(), "y" | "yes"))
+}
+
+fn handle_migrate_command(resolution: &BacklogResolution, target: &str, yes: bool) -> Result<()> {
+    if !yes
+        && io::stdin().is_terminal()
+        && !prompts_disabled()
+        && !confirm_migration(&resolution.state_root)?
+    {
+        let _ = update_do_not_migrate(&resolution.repo_root, true);
+        println!("Migration cancelled.");
+        return Ok(());
+    }
+    match migrate_backlog(resolution, target) {
+        Ok(result) => {
+            let _ = update_do_not_migrate(&resolution.repo_root, false);
+            println!(
+                "Migrated {} -> {}",
+                result.from.display(),
+                result.to.display()
+            );
+        }
+        Err(MigrationError::AlreadyMigrated(path)) => {
+            println!("Already migrated at {}", path.display());
+        }
+        Err(MigrationError::DestinationExists(path)) => {
+            println!("Destination exists: {}", path.display());
+        }
+        Err(err) => return Err(err.into()),
+    }
+    Ok(())
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    };
+    absolute.canonicalize().unwrap_or(absolute)
+}
+
+fn normalize_path_string(path: &Path) -> String {
+    normalize_path(path).to_string_lossy().to_string()
+}
+
+fn best_effort_worktree_binding(
+    home: &Path,
+    cwd: &Path,
+    repo_root: Option<&str>,
+) -> Option<WorktreeBinding> {
+    let registry = find_worktree_record_by_path(home, cwd).ok().flatten();
+    let branch =
+        current_worktree_branch(cwd).or_else(|| registry.as_ref().and_then(|r| r.branch.clone()));
+    let id = registry.as_ref().map(|r| r.id.clone());
+    let repo_root_value = registry
+        .as_ref()
+        .map(|r| r.repo_root.clone())
+        .or_else(|| repo_root.map(|value| normalize_path_string(Path::new(value))));
+
+    if branch.is_none() && id.is_none() {
+        return None;
+    }
+
+    Some(WorktreeBinding {
+        id,
+        path: normalize_path_string(cwd),
+        branch,
+        repo_root: repo_root_value,
+    })
+}
+
+fn resolve_workstream_for_repo(
+    home: &Path,
+    repo_root: &Path,
+    query: &str,
+) -> Result<WorkstreamRecord> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Err(anyhow::anyhow!("workstream id/key is blank"));
+    }
+
+    let streams = list_workstreams_for_repo(home, repo_root)?;
+    if streams.is_empty() {
+        return Err(anyhow::anyhow!("no workstreams found for this repo"));
+    }
+
+    if let Some(found) = streams.iter().find(|record| record.id == trimmed) {
+        return Ok(found.clone());
+    }
+
+    let mut by_key: Vec<&WorkstreamRecord> = streams
+        .iter()
+        .filter(|record| {
+            record
+                .key
+                .as_ref()
+                .map(|key| key.eq_ignore_ascii_case(trimmed))
+                .unwrap_or(false)
+        })
+        .collect();
+    by_key.sort_by(|a, b| a.id.cmp(&b.id));
+    if by_key.len() == 1 {
+        return Ok(by_key[0].clone());
+    }
+    if by_key.len() > 1 {
+        return Err(anyhow::anyhow!(
+            "ambiguous workstream key '{}': matches {} records",
+            trimmed,
+            by_key.len()
+        ));
+    }
+
+    Err(anyhow::anyhow!("workstream not found: {}", trimmed))
+}
+
+fn handle_workstream_command(
+    backlog_dir: &Path,
+    repo_root: &Path,
+    home: &Path,
+    command: WorkstreamCommand,
+) -> Result<()> {
+    let registry_repo_root = resolve_repo_root_for_registry(repo_root);
+    match command {
+        WorkstreamCommand::List { json } => {
+            let streams = list_workstreams_for_repo(home, &registry_repo_root)?;
+            let active_id = load_context(backlog_dir)?
+                .and_then(|ctx| ctx.workstream_id)
+                .filter(|value| !value.trim().is_empty());
+
+            let views: Vec<serde_json::Value> = streams
+                .iter()
+                .map(|record| {
+                    serde_json::json!({
+                        "id": record.id,
+                        "key": record.key,
+                        "name": record.name,
+                        "status": record.status.as_str(),
+                        "active": active_id.as_deref().map(|id| id == record.id).unwrap_or(false),
+                        "worktree_path": record.worktree.as_ref().map(|w| w.path.clone()),
+                        "branch": record.worktree.as_ref().and_then(|w| w.branch.clone()),
+                        "session_id": record.session_id,
+                        "updated_at": record.updated_at
+                    })
+                })
+                .collect();
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "repo_root": normalize_path_string(&registry_repo_root),
+                        "registry_path": workmesh_core::workstreams::workstreams_registry_path(home),
+                        "active_workstream_id": active_id,
+                        "workstreams": views
+                    }))?
+                );
+            } else if views.is_empty() {
+                println!("(no workstreams)");
+            } else {
+                for view in views {
+                    let active = view["active"].as_bool().unwrap_or(false);
+                    let marker = if active { "*" } else { " " };
+                    let id = view["id"].as_str().unwrap_or("-");
+                    let key = view["key"].as_str().unwrap_or("-");
+                    let status = view["status"].as_str().unwrap_or("-");
+                    let name = view["name"].as_str().unwrap_or("-");
+                    let branch = view["branch"].as_str().unwrap_or("-");
+                    let path = view["worktree_path"].as_str().unwrap_or("-");
+                    println!(
+                        "{} {} | key={} | status={} | branch={} | path={} | {}",
+                        marker, id, key, status, branch, path, name
+                    );
+                }
+            }
+        }
+        WorkstreamCommand::Restore { all, json } => {
+            let plan = build_workstream_restore_plan(
+                home,
+                repo_root,
+                WorkstreamRestoreOptions {
+                    include_inactive: all,
+                },
+            )?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else if plan.workstreams.is_empty() {
+                if all {
+                    println!("(no workstreams)");
+                } else {
+                    println!("(no active workstreams)");
+                }
+            } else {
+                println!("repo_root: {}", plan.repo_root);
+                println!("workstreams: {}", plan.workstreams.len());
+                println!();
+                for entry in plan.workstreams {
+                    let key = entry.key.as_deref().unwrap_or("-");
+                    let path = entry.worktree_path.as_deref().unwrap_or("-");
+                    let session_id = entry.session_id.as_deref().unwrap_or("-");
+                    let objective = entry.context.objective.as_deref().unwrap_or("-");
+                    let next = entry
+                        .next_task
+                        .as_ref()
+                        .map(|task| format!("{} | {} | {}", task.id, task.status, task.title))
+                        .unwrap_or_else(|| "-".to_string());
+                    println!(
+                        "{} | key={} | status={} | path={} | session_id={}",
+                        entry.id,
+                        key,
+                        entry.status.as_str(),
+                        path,
+                        session_id
+                    );
+                    println!("objective: {}", objective);
+                    println!("next_task: {}", next);
+                    if entry.issues.is_empty() {
+                        println!("issues: ok");
+                    } else {
+                        println!("issues:");
+                        for issue in entry.issues {
+                            println!("- {}", issue);
+                        }
+                    }
+                    if !entry.resume_script.is_empty() {
+                        println!("resume:");
+                        for line in entry.resume_script {
+                            println!("{}", line);
+                        }
+                    }
+                    println!();
+                }
+            }
+        }
+        WorkstreamCommand::Show {
+            id,
+            truth,
+            restore,
+            json,
+        } => {
+            let active_id = load_context(backlog_dir)?
+                .and_then(|ctx| ctx.workstream_id)
+                .filter(|value| !value.trim().is_empty());
+            let query = id
+                .as_deref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .or(active_id);
+            let Some(query) = query else {
+                die("No workstream id provided and no active workstream set in context");
+            };
+
+            let record = resolve_workstream_for_repo(home, &registry_repo_root, &query)?;
+            let mut issues: Vec<String> = Vec::new();
+            if let Some(worktree) = record.worktree.as_ref() {
+                if !Path::new(&worktree.path).exists() {
+                    issues.push(format!("missing_worktree_path: {}", worktree.path));
+                }
+            }
+            if let Some(session_id) = record.session_id.as_deref() {
+                let sessions = load_sessions_latest_fast(home).unwrap_or_default();
+                if !sessions.iter().any(|s| s.id == session_id) {
+                    issues.push(format!("missing_session_id: {}", session_id));
+                }
+            }
+
+            let truths = if truth {
+                list_truths(
+                    backlog_dir,
+                    &TruthQuery {
+                        states: vec![TruthState::Accepted],
+                        workstream_id: Some(record.id.clone()),
+                        limit: Some(20),
+                        ..TruthQuery::default()
+                    },
+                )?
+            } else {
+                Vec::new()
+            };
+
+            let restore_view = if restore {
+                let plan = build_workstream_restore_plan(
+                    home,
+                    repo_root,
+                    WorkstreamRestoreOptions {
+                        include_inactive: true,
+                    },
+                )?;
+                plan.workstreams
+                    .into_iter()
+                    .find(|entry| entry.id == record.id)
+            } else {
+                None
+            };
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "workstream": record,
+                        "issues": issues,
+                        "truths": truths,
+                        "restore": restore_view
+                    }))?
+                );
+            } else {
+                println!("id: {}", record.id);
+                if let Some(key) = record.key.as_deref() {
+                    println!("key: {}", key);
+                }
+                println!("name: {}", record.name);
+                println!("status: {}", record.status.as_str());
+                if let Some(worktree) = record.worktree.as_ref() {
+                    println!("worktree.path: {}", worktree.path);
+                    if let Some(branch) = worktree.branch.as_deref() {
+                        println!("worktree.branch: {}", branch);
+                    }
+                }
+                if let Some(session_id) = record.session_id.as_deref() {
+                    println!("session_id: {}", session_id);
+                }
+                if !issues.is_empty() {
+                    println!("issues:");
+                    for issue in issues {
+                        println!("- {}", issue);
+                    }
+                }
+                if truth {
+                    if truths.is_empty() {
+                        println!("truths: (none)");
+                    } else {
+                        println!("truths:");
+                        for truth_record in truths {
+                            println!(
+                                "- {} | {} | {}",
+                                truth_record.id,
+                                truth_record.state.as_str(),
+                                truth_record.title
+                            );
+                        }
+                    }
+                }
+
+                if restore {
+                    if let Some(entry) = restore_view.as_ref() {
+                        if !entry.resume_script.is_empty() {
+                            println!("resume:");
+                            for line in &entry.resume_script {
+                                println!("{}", line);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        WorkstreamCommand::Pause { id, json } => {
+            let active_id = load_context(backlog_dir)?
+                .and_then(|ctx| ctx.workstream_id)
+                .filter(|value| !value.trim().is_empty());
+            let query = id
+                .as_deref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .or(active_id.clone())
+                .unwrap_or_else(|| {
+                    die("No workstream id provided and no active workstream set in context")
+                });
+
+            let record = resolve_workstream_for_repo(home, &registry_repo_root, &query)?;
+            let updated = update_workstream_for_repo_by_id(
+                home,
+                &registry_repo_root,
+                &record.id,
+                |record| {
+                    record.status = WorkstreamStatus::Paused;
+                },
+            )?;
+
+            let cleared_active = active_id
+                .as_deref()
+                .map(|value| value == updated.id)
+                .unwrap_or(false);
+            if cleared_active {
+                if let Ok(Some(existing)) = load_context(backlog_dir) {
+                    let mut next = existing;
+                    next.workstream_id = None;
+                    let _ = save_context(backlog_dir, next);
+                }
+            }
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "workstream": updated,
+                        "cleared_active": cleared_active
+                    }))?
+                );
+            } else {
+                println!("Paused workstream {}", updated.id);
+                if cleared_active {
+                    println!("Cleared active workstream pointer in this worktree.");
+                }
+            }
+        }
+        WorkstreamCommand::Close { id, json } => {
+            let active_id = load_context(backlog_dir)?
+                .and_then(|ctx| ctx.workstream_id)
+                .filter(|value| !value.trim().is_empty());
+            let query = id
+                .as_deref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .or(active_id.clone())
+                .unwrap_or_else(|| {
+                    die("No workstream id provided and no active workstream set in context")
+                });
+
+            let record = resolve_workstream_for_repo(home, &registry_repo_root, &query)?;
+            let updated = update_workstream_for_repo_by_id(
+                home,
+                &registry_repo_root,
+                &record.id,
+                |record| {
+                    record.status = WorkstreamStatus::Closed;
+                },
+            )?;
+
+            let cleared_active = active_id
+                .as_deref()
+                .map(|value| value == updated.id)
+                .unwrap_or(false);
+            if cleared_active {
+                if let Ok(Some(existing)) = load_context(backlog_dir) {
+                    let mut next = existing;
+                    next.workstream_id = None;
+                    let _ = save_context(backlog_dir, next);
+                }
+            }
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "workstream": updated,
+                        "cleared_active": cleared_active
+                    }))?
+                );
+            } else {
+                println!("Closed workstream {}", updated.id);
+                if cleared_active {
+                    println!("Cleared active workstream pointer in this worktree.");
+                }
+            }
+        }
+        WorkstreamCommand::Reopen { id, json } => {
+            let active_id = load_context(backlog_dir)?
+                .and_then(|ctx| ctx.workstream_id)
+                .filter(|value| !value.trim().is_empty());
+            let query = id
+                .as_deref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .or(active_id)
+                .unwrap_or_else(|| {
+                    die("No workstream id provided and no active workstream set in context")
+                });
+
+            let record = resolve_workstream_for_repo(home, &registry_repo_root, &query)?;
+            let updated = update_workstream_for_repo_by_id(
+                home,
+                &registry_repo_root,
+                &record.id,
+                |record| {
+                    record.status = WorkstreamStatus::Active;
+                },
+            )?;
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "workstream": updated
+                    }))?
+                );
+            } else {
+                println!("Reopened workstream {}", updated.id);
+            }
+        }
+        WorkstreamCommand::Rename { id, name, json } => {
+            let active_id = load_context(backlog_dir)?
+                .and_then(|ctx| ctx.workstream_id)
+                .filter(|value| !value.trim().is_empty());
+            let query = id
+                .as_deref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .or(active_id)
+                .unwrap_or_else(|| {
+                    die("No workstream id provided and no active workstream set in context")
+                });
+
+            let new_name = name.trim().to_string();
+            if new_name.is_empty() {
+                die("--name is required");
+            }
+
+            let record = resolve_workstream_for_repo(home, &registry_repo_root, &query)?;
+            let updated = update_workstream_for_repo_by_id(
+                home,
+                &registry_repo_root,
+                &record.id,
+                |record| {
+                    record.name = new_name.clone();
+                },
+            )?;
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "workstream": updated
+                    }))?
+                );
+            } else {
+                println!("Renamed workstream {} -> {}", updated.id, updated.name);
+            }
+        }
+        WorkstreamCommand::Set {
+            id,
+            key,
+            notes,
+            project,
+            epic,
+            objective,
+            tasks,
+            json,
+        } => {
+            let active_id = load_context(backlog_dir)?
+                .and_then(|ctx| ctx.workstream_id)
+                .filter(|value| !value.trim().is_empty());
+            let query = id
+                .as_deref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .or(active_id.clone())
+                .unwrap_or_else(|| {
+                    die("No workstream id provided and no active workstream set in context")
+                });
+
+            let existing = resolve_workstream_for_repo(home, &registry_repo_root, &query)?;
+
+            let desired_key = key.as_deref().map(|value| value.trim().to_string());
+            let desired_key = desired_key
+                .as_ref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_lowercase());
+            if let Some(desired_key) = desired_key.as_deref() {
+                let streams = list_workstreams_for_repo(home, &registry_repo_root)?;
+                if streams.iter().any(|record| {
+                    record.id != existing.id
+                        && record
+                            .key
+                            .as_ref()
+                            .map(|existing_key| existing_key.eq_ignore_ascii_case(desired_key))
+                            .unwrap_or(false)
+                }) {
+                    die(&format!(
+                        "Workstream key already exists for this repo: {}",
+                        desired_key
+                    ));
+                }
+            }
+
+            let desired_notes = notes
+                .as_deref()
+                .map(|value| value.trim().to_string())
+                .and_then(|value| if value.is_empty() { None } else { Some(value) });
+
+            let mut context_update: Option<WorkstreamContextSnapshot> = None;
+            let mut scope_update: Option<ContextScope> = None;
+            let task_ids = tasks
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(split_csv)
+                .unwrap_or_default();
+            if let Some(epic_id) = epic.as_deref() {
+                let trimmed = epic_id.trim();
+                if trimmed.is_empty() {
+                    scope_update = Some(ContextScope::default());
+                } else {
+                    scope_update = Some(ContextScope {
+                        mode: ContextScopeMode::Epic,
+                        epic_id: Some(trimmed.to_string()),
+                        task_ids: Vec::new(),
+                    });
+                }
+            } else if tasks.is_some() {
+                if task_ids.is_empty() {
+                    scope_update = Some(ContextScope::default());
+                } else {
+                    scope_update = Some(ContextScope {
+                        mode: ContextScopeMode::Tasks,
+                        epic_id: None,
+                        task_ids: task_ids.clone(),
+                    });
+                }
+            }
+
+            let context_changed =
+                project.is_some() || objective.is_some() || epic.is_some() || tasks.is_some();
+            if context_changed {
+                let mut snapshot = existing.context.clone().unwrap_or_default();
+                if let Some(project_id) = project
+                    .as_deref()
+                    .map(|v| v.trim())
+                    .filter(|v| !v.is_empty())
+                {
+                    snapshot.project_id = Some(project_id.to_string());
+                }
+                if let Some(obj) = objective
+                    .as_deref()
+                    .map(|v| v.trim())
+                    .filter(|v| !v.is_empty())
+                {
+                    snapshot.objective = Some(obj.to_string());
+                }
+                if let Some(scope) = scope_update.as_ref() {
+                    snapshot.scope = scope.clone();
+                }
+                context_update = Some(snapshot);
+            }
+
+            let updated = update_workstream_for_repo_by_id(
+                home,
+                &registry_repo_root,
+                &existing.id,
+                |record| {
+                    if key.is_some() {
+                        record.key = desired_key.clone();
+                    }
+                    if notes.is_some() {
+                        record.notes = desired_notes.clone();
+                    }
+                    if let Some(snapshot) = context_update.as_ref() {
+                        record.context = Some(snapshot.clone());
+                    }
+                },
+            )?;
+
+            // If we're updating the active workstream in this checkout, keep context.json in sync.
+            let should_update_context = active_id
+                .as_deref()
+                .map(|value| value == updated.id)
+                .unwrap_or(false)
+                && context_update.is_some();
+            if should_update_context {
+                if let Ok(Some(existing_ctx)) = load_context(backlog_dir) {
+                    let snapshot = context_update.clone().unwrap_or_default();
+                    let mut next = existing_ctx;
+                    next.workstream_id = Some(updated.id.clone());
+                    next.project_id = snapshot.project_id.clone();
+                    next.objective = snapshot.objective.clone();
+                    next.scope = snapshot.scope.clone();
+                    let _ = save_context(backlog_dir, next);
+                }
+            }
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "workstream": updated,
+                        "context_updated": should_update_context
+                    }))?
+                );
+            } else {
+                println!("Updated workstream {}", updated.id);
+                if should_update_context {
+                    println!("Updated repo-local context for this worktree.");
+                }
+            }
+        }
+        WorkstreamCommand::Create {
+            name,
+            key,
+            path,
+            branch,
+            existing,
+            from,
+            project,
+            epic,
+            objective,
+            tasks,
+            json,
+        } => {
+            let name = name.trim().to_string();
+            if name.is_empty() {
+                die("Workstream name is required");
+            }
+
+            let mut path = path;
+            let mut branch = branch;
+
+            if existing {
+                if path.is_none() {
+                    die("--path is required when --existing is set");
+                }
+            } else if path.is_some() ^ branch.is_some() {
+                die("--path and --branch must be provided together");
+            }
+
+            let should_auto_provision_worktree = !existing
+                && path.is_none()
+                && branch.is_none()
+                && resolve_worktrees_default(repo_root)
+                && git_has_head(repo_root)
+                && normalize_path(repo_root) == normalize_path(&registry_repo_root);
+            let explicit_key = key
+                .as_deref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string());
+
+            let handle_already_exists = |found: WorkstreamRecord,
+                                         target_path: &Path|
+             -> Result<()> {
+                let mut warnings: Vec<String> = Vec::new();
+
+                // Update current checkout context pointer to the existing workstream.
+                let existing_ctx = load_context(backlog_dir)?.unwrap_or_default();
+                let mut next = existing_ctx;
+                next.workstream_id = Some(found.id.clone());
+                if let Some(snapshot) = found.context.as_ref() {
+                    next.project_id = snapshot.project_id.clone();
+                    next.objective = snapshot.objective.clone();
+                    next.scope = snapshot.scope.clone();
+                }
+                save_context(backlog_dir, next)?;
+
+                // Also update the target worktree context (when it has a backlog/tasks layout).
+                let mut target_context_updated = false;
+                let seed_root = normalize_path(target_path);
+                match resolve_backlog(&seed_root) {
+                    Ok(resolution) => {
+                        let existing = load_context(&resolution.state_root)?.unwrap_or_default();
+                        let mut state = existing;
+                        state.workstream_id = Some(found.id.clone());
+                        if let Some(snapshot) = found.context.as_ref() {
+                            state.project_id = snapshot.project_id.clone();
+                            state.objective = snapshot.objective.clone();
+                            state.scope = snapshot.scope.clone();
+                        }
+                        save_context(&resolution.state_root, state)?;
+                        target_context_updated = true;
+                    }
+                    Err(_) => warnings.push(format!(
+                        "context update skipped (no tasks found under {})",
+                        seed_root.display()
+                    )),
+                }
+
+                if json {
+                    println!(
+                        "{}",
+                        serde_json::to_string_pretty(&serde_json::json!({
+                            "ok": true,
+                            "already_exists": true,
+                            "workstream": found,
+                            "registry_path": workmesh_core::workstreams::workstreams_registry_path(home),
+                            "worktree": serde_json::Value::Null,
+                            "context_seeded": false,
+                            "context_updated": true,
+                            "target_context_updated": target_context_updated,
+                            "warnings": warnings
+                        }))?
+                    );
+                } else {
+                    println!("Workstream already exists: {}", found.id);
+                    if let Some(worktree) = found.worktree.as_ref() {
+                        println!("worktree: {}", worktree.path);
+                    }
+                    println!("bound_path: {}", target_path.display());
+                    println!("Updated repo-local context for this worktree.");
+                    if target_context_updated
+                        && normalize_path(repo_root) != normalize_path(target_path)
+                    {
+                        println!("Updated context in {}", target_path.display());
+                    }
+                    for warning in warnings {
+                        println!("warning: {}", warning);
+                    }
+                }
+
+                Ok(())
+            };
+
+            // Smart/idempotent create: if the target worktree path is already bound to a workstream,
+            // return that workstream instead of creating a duplicate.
+            //
+            // Skip this early check when auto-provisioning since the target path isn't repo_root.
+            if !should_auto_provision_worktree {
+                let target_path = if existing {
+                    path.clone().expect("validated --path for --existing")
+                } else if let Some(value) = path.as_ref() {
+                    value.clone()
+                } else {
+                    repo_root.to_path_buf()
+                };
+
+                if existing && !target_path.exists() {
+                    die(&format!(
+                        "--path does not exist for --existing: {}",
+                        target_path.display()
+                    ));
+                }
+
+                if let Some(found) = find_workstream_for_repo_by_worktree_path(
+                    home,
+                    &registry_repo_root,
+                    &target_path,
+                )? {
+                    if let Some(explicit) = explicit_key.as_deref() {
+                        let matches = found
+                            .key
+                            .as_deref()
+                            .map(|value| value.eq_ignore_ascii_case(explicit))
+                            .unwrap_or(false);
+                        if !matches {
+                            die(&format!(
+                                "Worktree path is already bound to workstream {} (key={}); requested key does not match: {}",
+                                found.id,
+                                found.key.clone().unwrap_or_else(|| "-".to_string()),
+                                explicit
+                            ));
+                        }
+                    }
+                    handle_already_exists(found, &target_path)?;
+                    return Ok(());
+                }
+            }
+
+            let resolved_key = match explicit_key
+                .as_deref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            {
+                Some(candidate) => {
+                    // Special-case idempotency for auto-provision: if the derived worktree path for
+                    // this key is already bound, treat create as a no-op.
+                    if should_auto_provision_worktree {
+                        let key_value = candidate.to_lowercase();
+                        let worktrees_dir = default_worktrees_dir(repo_root);
+                        let expected_path = worktrees_dir.join(&key_value);
+                        if let Some(found) = find_workstream_for_repo_by_worktree_path(
+                            home,
+                            &registry_repo_root,
+                            &expected_path,
+                        )? {
+                            let matches = found
+                                .key
+                                .as_deref()
+                                .map(|value| value.eq_ignore_ascii_case(candidate))
+                                .unwrap_or(false);
+                            if !matches {
+                                die(&format!(
+                                    "Worktree path is already bound to workstream {} (key={}); requested key does not match: {}",
+                                    found.id,
+                                    found.key.clone().unwrap_or_else(|| "-".to_string()),
+                                    candidate
+                                ));
+                            }
+                            handle_already_exists(found, &expected_path)?;
+                            return Ok(());
+                        }
+                    }
+
+                    let existing = list_workstreams_for_repo(home, &registry_repo_root)?;
+                    if existing.iter().any(|record| {
+                        record
+                            .key
+                            .as_ref()
+                            .map(|existing_key| existing_key.eq_ignore_ascii_case(candidate))
+                            .unwrap_or(false)
+                    }) {
+                        die(&format!(
+                            "Workstream key already exists for this repo: {}",
+                            candidate
+                        ));
+                    }
+                    Some(candidate.to_lowercase())
+                }
+                None => Some(derive_unique_workstream_key(
+                    home,
+                    &registry_repo_root,
+                    &name,
+                )?),
+            };
+
+            if should_auto_provision_worktree {
+                let key_value = resolved_key
+                    .as_deref()
+                    .map(|value| value.trim())
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("ws");
+                let worktrees_dir = default_worktrees_dir(repo_root);
+                path = Some(worktrees_dir.join(key_value));
+                let branch_base = format!("ws/{}", key_value);
+                branch = Some(derive_unique_worktree_branch(repo_root, &branch_base));
+
+                if let Some(target_path) = path.as_ref() {
+                    if let Some(found) = find_workstream_for_repo_by_worktree_path(
+                        home,
+                        &registry_repo_root,
+                        target_path,
+                    )? {
+                        if let Some(explicit) = explicit_key.as_deref() {
+                            let matches = found
+                                .key
+                                .as_deref()
+                                .map(|value| value.eq_ignore_ascii_case(explicit))
+                                .unwrap_or(false);
+                            if !matches {
+                                die(&format!(
+                                    "Worktree path is already bound to workstream {} (key={}); requested key does not match: {}",
+                                    found.id,
+                                    found.key.clone().unwrap_or_else(|| "-".to_string()),
+                                    explicit
+                                ));
+                            }
+                        }
+                        handle_already_exists(found, target_path)?;
+                        return Ok(());
+                    }
+                }
+            }
+
+            // Determine initial scope from explicit flags, falling back to branch-derived epic id.
+            let task_ids = tasks
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(split_csv)
+                .unwrap_or_default();
+            let branch_hint = branch
+                .clone()
+                .or_else(|| path.as_ref().and_then(|path| current_worktree_branch(path)));
+            let inferred_epic = epic
+                .clone()
+                .or_else(|| branch_hint.as_deref().and_then(extract_task_id_from_branch));
+            let scope = if inferred_epic
+                .as_deref()
+                .map(|id| !id.trim().is_empty())
+                .unwrap_or(false)
+            {
+                ContextScope {
+                    mode: ContextScopeMode::Epic,
+                    epic_id: inferred_epic,
+                    task_ids: Vec::new(),
+                }
+            } else if !task_ids.is_empty() {
+                ContextScope {
+                    mode: ContextScopeMode::Tasks,
+                    epic_id: None,
+                    task_ids,
+                }
+            } else {
+                ContextScope {
+                    mode: ContextScopeMode::None,
+                    epic_id: None,
+                    task_ids: Vec::new(),
+                }
+            };
+
+            let inferred_project = project.clone().or_else(|| infer_project_id(repo_root));
+            let context_snapshot = WorkstreamContextSnapshot {
+                project_id: inferred_project.clone(),
+                objective: objective.clone(),
+                scope: scope.clone(),
+            };
+
+            let current_session_id = read_current_session_id(home);
+            let (created_worktree, binding, context_seeded, warnings) = if existing {
+                let selected_path = path.as_ref().expect("path required for --existing");
+                if !selected_path.exists() {
+                    die(&format!(
+                        "--path does not exist for --existing: {}",
+                        selected_path.display()
+                    ));
+                }
+
+                let normalized_path = normalize_path_string(selected_path);
+                let branch_value = branch
+                    .clone()
+                    .or_else(|| current_worktree_branch(selected_path));
+
+                let existing_record = find_worktree_record_by_path(home, selected_path)?;
+                let record = upsert_worktree_record(
+                    home,
+                    WorktreeRecord {
+                        id: existing_record
+                            .as_ref()
+                            .map(|record| record.id.clone())
+                            .unwrap_or_default(),
+                        repo_root: normalize_path_string(repo_root),
+                        path: normalized_path,
+                        branch: branch_value.clone(),
+                        created_at: existing_record
+                            .as_ref()
+                            .map(|record| record.created_at.clone())
+                            .unwrap_or_default(),
+                        updated_at: String::new(),
+                        attached_session_id: current_session_id.clone(),
+                    },
+                )?;
+                let binding = WorktreeBinding {
+                    id: Some(record.id.clone()),
+                    path: record.path.clone(),
+                    branch: record.branch.clone().or(branch_value),
+                    repo_root: Some(record.repo_root.clone()),
+                };
+
+                // Best-effort context seed for existing worktrees.
+                let mut seeded = false;
+                let mut warnings = Vec::new();
+                let seed_root = normalize_path(selected_path);
+                match resolve_backlog(&seed_root) {
+                    Ok(resolution) => {
+                        let _ = save_context(
+                            &resolution.state_root,
+                            ContextState {
+                                version: 1,
+                                project_id: inferred_project.clone(),
+                                objective: objective.clone(),
+                                workstream_id: None, // filled after the workstream record exists
+                                scope: scope.clone(),
+                                updated_at: None,
+                            },
+                        )?;
+                        seeded = true;
+                    }
+                    Err(_) => warnings.push(format!(
+                        "context seed skipped (no tasks found under {})",
+                        seed_root.display()
+                    )),
+                }
+
+                (None, binding, seeded, warnings)
+            } else if let (Some(path), Some(branch)) = (path.as_ref(), branch.as_ref()) {
+                let created = create_git_worktree(repo_root, path, branch, from.as_deref())?;
+                let record = upsert_worktree_record(
+                    home,
+                    WorktreeRecord {
+                        id: String::new(),
+                        repo_root: normalize_path_string(repo_root),
+                        path: created.path.clone(),
+                        branch: created.branch.clone().or_else(|| Some(branch.clone())),
+                        created_at: String::new(),
+                        updated_at: String::new(),
+                        attached_session_id: current_session_id.clone(),
+                    },
+                )?;
+                let binding = WorktreeBinding {
+                    id: Some(record.id.clone()),
+                    path: record.path.clone(),
+                    branch: record.branch.clone(),
+                    repo_root: Some(record.repo_root.clone()),
+                };
+
+                // Always attempt to seed context for the new worktree to mark it active.
+                let mut seeded = false;
+                let mut warnings = Vec::new();
+                let seed_root = normalize_path(path);
+                match resolve_backlog(&seed_root) {
+                    Ok(resolution) => {
+                        let _ = save_context(
+                            &resolution.state_root,
+                            ContextState {
+                                version: 1,
+                                project_id: inferred_project.clone(),
+                                objective: objective.clone(),
+                                workstream_id: None, // filled after the workstream record exists
+                                scope: scope.clone(),
+                                updated_at: None,
+                            },
+                        )?;
+                        seeded = true;
+                    }
+                    Err(_) => warnings.push(format!(
+                        "context seed skipped (no tasks found under {})",
+                        seed_root.display()
+                    )),
+                }
+
+                (Some(created), binding, seeded, warnings)
+            } else {
+                let binding = best_effort_worktree_binding(
+                    home,
+                    repo_root,
+                    Some(&normalize_path_string(repo_root)),
+                )
+                .unwrap_or(WorktreeBinding {
+                    id: None,
+                    path: normalize_path_string(repo_root),
+                    branch: current_worktree_branch(repo_root),
+                    repo_root: Some(normalize_path_string(repo_root)),
+                });
+                (None, binding, false, Vec::new())
+            };
+
+            let inserted = upsert_workstream_record(
+                home,
+                WorkstreamRecord {
+                    id: String::new(),
+                    repo_root: normalize_path_string(&registry_repo_root),
+                    key: resolved_key,
+                    name,
+                    status: WorkstreamStatus::Active,
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                    worktree: Some(binding.clone()),
+                    session_id: current_session_id.clone(),
+                    context: Some(context_snapshot.clone()),
+                    truth_refs: Vec::new(),
+                    notes: None,
+                },
+            )?;
+
+            // Persist active pointer and current context in this worktree.
+            let _ = save_context(
+                backlog_dir,
+                ContextState {
+                    version: 1,
+                    project_id: inferred_project.clone(),
+                    objective: objective.clone(),
+                    workstream_id: Some(inserted.id.clone()),
+                    scope,
+                    updated_at: None,
+                },
+            )?;
+
+            // If we pre-seeded context in the new worktree, update its workstream_id now that we
+            // have the real id.
+            if let Some(path) = path.as_ref() {
+                let seed_root = normalize_path(path);
+                if let Ok(resolution) = resolve_backlog(&seed_root) {
+                    if let Ok(existing) = load_context(&resolution.state_root) {
+                        let mut state = existing.unwrap_or_default();
+                        state.workstream_id = Some(inserted.id.clone());
+                        let _ = save_context(&resolution.state_root, state);
+                    }
+                }
+            }
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "already_exists": false,
+                        "workstream": inserted,
+                        "registry_path": workmesh_core::workstreams::workstreams_registry_path(home),
+                        "worktree": created_worktree,
+                        "context_seeded": context_seeded,
+                        "warnings": warnings
+                    }))?
+                );
+            } else {
+                println!("Created workstream {}", inserted.id);
+                if let Some(worktree) = inserted.worktree.as_ref() {
+                    println!("worktree: {}", worktree.path);
+                }
+                if let Some(created) = created_worktree.as_ref() {
+                    println!("Created git worktree at {}", created.path);
+                }
+                for warning in warnings {
+                    println!("warning: {}", warning);
+                }
+            }
+        }
+        WorkstreamCommand::Switch { id, json } => {
+            let record = resolve_workstream_for_repo(home, &registry_repo_root, &id)?;
+            let existing = load_context(backlog_dir)?.unwrap_or_default();
+            let mut next = existing.clone();
+            next.workstream_id = Some(record.id.clone());
+            if let Some(snapshot) = record.context.as_ref() {
+                next.project_id = snapshot.project_id.clone();
+                next.objective = snapshot.objective.clone();
+                next.scope = snapshot.scope.clone();
+            }
+            let _ = save_context(backlog_dir, next)?;
+
+            if let Some(session_id) = record.session_id.as_deref() {
+                let _ = set_current_session(home, session_id);
+            }
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "workstream": record,
+                        "worktree_path": record.worktree.as_ref().map(|w| w.path.clone()),
+                        "session_id": record.session_id
+                    }))?
+                );
+            } else {
+                println!("Switched active workstream to {}", record.id);
+                if let Some(path) = record.worktree.as_ref().map(|w| w.path.clone()) {
+                    println!("worktree: {}", path);
+                }
+                if let Some(session_id) = record.session_id.as_deref() {
+                    println!("session_id: {}", session_id);
+                }
+            }
+        }
+        WorkstreamCommand::Doctor { json } => {
+            let streams = list_workstreams_for_repo(home, &registry_repo_root)?;
+            let active_id = load_context(backlog_dir)?
+                .and_then(|ctx| ctx.workstream_id)
+                .filter(|value| !value.trim().is_empty());
+            let sessions = load_sessions_latest_fast(home).unwrap_or_default();
+            let session_ids: HashSet<String> = sessions.into_iter().map(|s| s.id).collect();
+
+            let mut issues: Vec<String> = Vec::new();
+            if let Some(active_id) = active_id.as_deref() {
+                if !streams.iter().any(|record| record.id == active_id) {
+                    issues.push(format!(
+                        "active_workstream_id_not_found_in_registry: {}",
+                        active_id
+                    ));
+                }
+            }
+
+            let mut entries: Vec<serde_json::Value> = Vec::new();
+            for record in streams {
+                let mut record_issues: Vec<String> = Vec::new();
+                if let Some(worktree) = record.worktree.as_ref() {
+                    if !Path::new(&worktree.path).exists() {
+                        record_issues.push("missing_worktree_path".to_string());
+                    }
+                }
+                if let Some(session_id) = record.session_id.as_deref() {
+                    if !session_ids.contains(session_id) {
+                        record_issues.push("missing_session_id".to_string());
+                    }
+                }
+                if record.key.is_none() {
+                    record_issues.push("missing_key".to_string());
+                }
+                entries.push(serde_json::json!({
+                    "id": record.id,
+                    "key": record.key,
+                    "name": record.name,
+                    "status": record.status.as_str(),
+                    "issues": record_issues,
+                    "worktree_path": record.worktree.as_ref().map(|w| w.path.clone()),
+                    "session_id": record.session_id
+                }));
+            }
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "repo_root": normalize_path_string(&registry_repo_root),
+                        "registry_path": workmesh_core::workstreams::workstreams_registry_path(home),
+                        "active_workstream_id": active_id,
+                        "issues": issues,
+                        "workstreams": entries
+                    }))?
+                );
+            } else {
+                if issues.is_empty() {
+                    println!("ok");
+                } else {
+                    println!("issues:");
+                    for issue in issues {
+                        println!("- {}", issue);
+                    }
+                }
+                for entry in entries {
+                    let id = entry["id"].as_str().unwrap_or("-");
+                    let key = entry["key"].as_str().unwrap_or("-");
+                    let status = entry["status"].as_str().unwrap_or("-");
+                    let record_issues = entry["issues"]
+                        .as_array()
+                        .map(|values| {
+                            values
+                                .iter()
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let summary = if record_issues.is_empty() {
+                        "ok".to_string()
+                    } else {
+                        record_issues.join(",")
+                    };
+                    println!(
+                        "{} | key={} | status={} | issues={}",
+                        id, key, status, summary
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_worktree_command(repo_root: &Path, home: &Path, command: WorktreeCommand) -> Result<()> {
+    match command {
+        WorktreeCommand::List { json } => {
+            let entries = list_worktree_views(repo_root, home)?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "repo_root": normalize_path_string(repo_root),
+                        "registry_path": workmesh_core::worktrees::worktrees_registry_path(home),
+                        "worktrees": entries
+                    }))?
+                );
+            } else if entries.is_empty() {
+                println!("(no worktrees)");
+            } else {
+                for entry in entries {
+                    let branch = entry.branch.unwrap_or_else(|| "-".to_string());
+                    let issues = if entry.issues.is_empty() {
+                        "ok".to_string()
+                    } else {
+                        entry.issues.join(",")
+                    };
+                    println!(
+                        "{} | branch={} | sources={} | issues={}",
+                        entry.path,
+                        branch,
+                        entry.source.join("+"),
+                        issues
+                    );
+                }
+            }
+        }
+        WorktreeCommand::Create {
+            path,
+            branch,
+            from,
+            project,
+            epic,
+            objective,
+            tasks,
+            json,
+        } => {
+            let created = create_git_worktree(repo_root, &path, &branch, from.as_deref())?;
+            let record = upsert_worktree_record(
+                home,
+                WorktreeRecord {
+                    id: String::new(),
+                    repo_root: normalize_path_string(repo_root),
+                    path: created.path.clone(),
+                    branch: created.branch.clone().or_else(|| Some(branch.clone())),
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                    attached_session_id: read_current_session_id(home),
+                },
+            )?;
+
+            let should_seed_context = project.is_some()
+                || epic.is_some()
+                || objective.is_some()
+                || tasks
+                    .as_deref()
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false);
+            let mut context_seeded = false;
+            let mut warnings = Vec::new();
+
+            if should_seed_context {
+                let seed_root = normalize_path(&path);
+                match resolve_backlog(&seed_root) {
+                    Ok(resolution) => {
+                        let task_ids = tasks
+                            .as_deref()
+                            .filter(|value| !value.trim().is_empty())
+                            .map(split_csv)
+                            .unwrap_or_default();
+                        let inferred_epic = epic
+                            .clone()
+                            .or_else(|| extract_task_id_from_branch(&branch));
+                        let scope = if inferred_epic
+                            .as_deref()
+                            .map(|id| !id.trim().is_empty())
+                            .unwrap_or(false)
+                        {
+                            ContextScope {
+                                mode: ContextScopeMode::Epic,
+                                epic_id: inferred_epic,
+                                task_ids: Vec::new(),
+                            }
+                        } else if !task_ids.is_empty() {
+                            ContextScope {
+                                mode: ContextScopeMode::Tasks,
+                                epic_id: None,
+                                task_ids,
+                            }
+                        } else {
+                            ContextScope {
+                                mode: ContextScopeMode::None,
+                                epic_id: None,
+                                task_ids: Vec::new(),
+                            }
+                        };
+                        let _ = save_context(
+                            &resolution.state_root,
+                            ContextState {
+                                version: 1,
+                                project_id: project
+                                    .clone()
+                                    .or_else(|| infer_project_id(&seed_root)),
+                                objective: objective.clone(),
+                                workstream_id: None,
+                                scope,
+                                updated_at: None,
+                            },
+                        )?;
+                        context_seeded = true;
+                    }
+                    Err(_) => warnings.push(format!(
+                        "context seed skipped (no tasks found under {})",
+                        seed_root.display()
+                    )),
+                }
+            }
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "worktree": created,
+                        "registry": record,
+                        "context_seeded": context_seeded,
+                        "warnings": warnings
+                    }))?
+                );
+            } else {
+                println!("Created worktree at {}", record.path);
+                if context_seeded {
+                    println!("Seeded context for new worktree.");
+                }
+                for warning in warnings {
+                    println!("warning: {}", warning);
+                }
+            }
+        }
+        WorktreeCommand::AdoptClone {
+            from,
+            to,
+            branch,
+            allow_dirty,
+            apply,
+            json,
+        } => {
+            let outcome = workmesh_core::worktrees::adopt_clone_to_worktree(
+                home,
+                repo_root,
+                &from,
+                to.as_deref(),
+                branch.as_deref(),
+                allow_dirty,
+                apply,
+            )?;
+
+            if json {
+                println!("{}", serde_json::to_string_pretty(&outcome)?);
+            } else {
+                println!("repo_root: {}", outcome.plan.repo_root);
+                println!("from: {}", outcome.plan.from_path);
+                println!("to: {}", outcome.plan.to_path);
+                println!("source_branch: {}", outcome.plan.source_branch);
+                println!("target_branch: {}", outcome.plan.target_branch);
+                println!("dirty: {}", outcome.plan.dirty);
+                if !outcome.plan.warnings.is_empty() {
+                    println!("warnings:");
+                    for warning in &outcome.plan.warnings {
+                        println!("- {}", warning);
+                    }
+                }
+                println!("plan:");
+                for action in &outcome.plan.actions {
+                    println!("{}", action);
+                }
+                if outcome.applied {
+                    println!("applied: true");
+                    if let Some(worktree) = outcome.worktree.as_ref() {
+                        println!("worktree.path: {}", worktree.path);
+                    }
+                } else {
+                    println!("applied: false (dry-run)");
+                }
+            }
+        }
+        WorktreeCommand::Attach {
+            session_id,
+            path,
+            json,
+        } => {
+            let session_id = session_id
+                .or_else(|| read_current_session_id(home))
+                .unwrap_or_else(|| {
+                    die("No session id provided and no current session pointer found")
+                });
+            let sessions = load_sessions_latest_fast(home)?;
+            let existing = sessions
+                .into_iter()
+                .find(|s| s.id == session_id)
+                .unwrap_or_else(|| die(&format!("Session not found: {}", session_id)));
+
+            let selected_path = match path {
+                Some(path) => path,
+                None => std::env::current_dir()?,
+            };
+            let normalized_path = normalize_path_string(&selected_path);
+            let branch = current_worktree_branch(&selected_path);
+            let repo_root_value = existing
+                .repo_root
+                .clone()
+                .unwrap_or_else(|| normalize_path_string(repo_root));
+            let existing_record = find_worktree_record_by_path(home, &selected_path)?;
+            let record = upsert_worktree_record(
+                home,
+                WorktreeRecord {
+                    id: existing_record
+                        .as_ref()
+                        .map(|record| record.id.clone())
+                        .unwrap_or_default(),
+                    repo_root: repo_root_value,
+                    path: normalized_path,
+                    branch: branch.clone(),
+                    created_at: existing_record
+                        .as_ref()
+                        .map(|record| record.created_at.clone())
+                        .unwrap_or_default(),
+                    updated_at: String::new(),
+                    attached_session_id: Some(session_id.clone()),
+                },
+            )?;
+            let binding = WorktreeBinding {
+                id: Some(record.id.clone()),
+                path: record.path.clone(),
+                branch: record.branch.clone().or(branch),
+                repo_root: Some(record.repo_root.clone()),
+            };
+            let mut updated = existing.clone();
+            updated.updated_at = now_rfc3339();
+            updated.worktree = Some(binding.clone());
+            updated.truth_refs = updated
+                .repo_root
+                .as_deref()
+                .and_then(|root| resolve_backlog(Path::new(root)).ok())
+                .map(|resolution| {
+                    truth_refs_for_scope(
+                        &resolution.state_root,
+                        updated.project_id.as_deref(),
+                        updated.epic_id.as_deref(),
+                        updated.worktree.as_ref().map(|item| item.path.as_str()),
+                        10,
+                    )
+                })
+                .unwrap_or_default();
+            append_session_saved(home, updated.clone())?;
+            set_current_session(home, &updated.id)?;
+
+            let registry_repo_root = resolve_repo_root_for_registry(repo_root);
+            if let Ok(backlog_dir) = locate_backlog_dir(repo_root) {
+                if let Ok(Some(ctx)) = load_context(&backlog_dir) {
+                    if let Some(workstream_id) = ctx
+                        .workstream_id
+                        .clone()
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        let snapshot = WorkstreamContextSnapshot::from_context_state(&ctx);
+                        update_workstream_for_repo_by_id(
+                            home,
+                            &registry_repo_root,
+                            &workstream_id,
+                            |record| {
+                                record.session_id = Some(updated.id.clone());
+                                record.worktree = Some(binding.clone());
+                                record.context = Some(snapshot.clone());
+                                record.truth_refs = updated.truth_refs.clone();
+                            },
+                        )?;
+                    }
+                }
+            }
+
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "session": updated,
+                        "worktree": binding
+                    }))?
+                );
+            } else {
+                println!("Attached session {} to {}", updated.id, binding.path);
+            }
+        }
+        WorktreeCommand::Detach { session_id, json } => {
+            let session_id = session_id
+                .or_else(|| read_current_session_id(home))
+                .unwrap_or_else(|| {
+                    die("No session id provided and no current session pointer found")
+                });
+            let sessions = load_sessions_latest_fast(home)?;
+            let existing = sessions
+                .into_iter()
+                .find(|s| s.id == session_id)
+                .unwrap_or_else(|| die(&format!("Session not found: {}", session_id)));
+            let previous_worktree = existing.worktree.clone();
+            let mut updated = existing.clone();
+            updated.updated_at = now_rfc3339();
+            updated.worktree = None;
+            updated.truth_refs = updated
+                .repo_root
+                .as_deref()
+                .and_then(|root| resolve_backlog(Path::new(root)).ok())
+                .map(|resolution| {
+                    truth_refs_for_scope(
+                        &resolution.state_root,
+                        updated.project_id.as_deref(),
+                        updated.epic_id.as_deref(),
+                        None,
+                        10,
+                    )
+                })
+                .unwrap_or_default();
+            append_session_saved(home, updated.clone())?;
+            set_current_session(home, &updated.id)?;
+
+            if let Some(binding) = previous_worktree.as_ref() {
+                let path = PathBuf::from(&binding.path);
+                if let Ok(Some(record)) = find_worktree_record_by_path(home, &path) {
+                    if record.attached_session_id.as_deref() == Some(session_id.as_str()) {
+                        set_worktree_attached_session_id(
+                            home,
+                            Path::new(&record.repo_root),
+                            Path::new(&record.path),
+                            record.branch.clone(),
+                            None,
+                        )?;
+                    }
+                }
+            }
+
+            let registry_repo_root = resolve_repo_root_for_registry(repo_root);
+            if let Ok(backlog_dir) = locate_backlog_dir(repo_root) {
+                if let Ok(Some(ctx)) = load_context(&backlog_dir) {
+                    if let Some(workstream_id) = ctx
+                        .workstream_id
+                        .clone()
+                        .filter(|value| !value.trim().is_empty())
+                    {
+                        let snapshot = WorkstreamContextSnapshot::from_context_state(&ctx);
+                        update_workstream_for_repo_by_id(
+                            home,
+                            &registry_repo_root,
+                            &workstream_id,
+                            |record| {
+                                if record.session_id.as_deref() == Some(session_id.as_str()) {
+                                    record.session_id = None;
+                                }
+                                record.context = Some(snapshot.clone());
+                            },
+                        )?;
+                    }
+                }
+            }
+            if json {
+                println!("{}", serde_json::to_string_pretty(&updated)?);
+            } else {
+                println!("Detached worktree from session {}", updated.id);
+            }
+        }
+        WorktreeCommand::Doctor { json } => {
+            let report = doctor_worktrees(repo_root, home)?;
+            if json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if report.issues.is_empty() {
+                println!("worktrees: ok");
+            } else {
+                println!("worktrees: {} issue(s)", report.issues.len());
+                for issue in report.issues {
+                    println!("- {}", issue);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn handle_config_command(repo_root: &Path, command: &ConfigCommand) -> Result<()> {
+    match command {
+        ConfigCommand::Show { json } => {
+            let project = load_config_with_path(repo_root).map(|(config, path)| {
+                serde_json::json!({
+                    "path": path,
+                    "config": config
+                })
+            });
+            let global = load_global_config_with_path().map(|(config, path)| {
+                serde_json::json!({
+                    "path": path,
+                    "config": config
+                })
+            });
+
+            let (worktrees_default, worktrees_default_source) =
+                resolve_worktrees_default_with_source(repo_root);
+            let (worktrees_dir, worktrees_dir_source) =
+                resolve_worktrees_dir_with_source(repo_root);
+            let (auto_session_default, auto_session_default_source) =
+                resolve_auto_session_default_with_source(repo_root);
+            let (task_validation, task_validation_sources) =
+                resolve_task_validation_rules_with_source(repo_root);
+
+            let payload = serde_json::json!({
+                "project": project,
+                "global": global,
+                "effective": {
+                    "worktrees_default": worktrees_default,
+                    "worktrees_dir": worktrees_dir.as_ref().map(|p| p.to_string_lossy().to_string()),
+                    "auto_session_default": auto_session_default,
+                    "task_require_description": task_validation.require_description,
+                    "task_require_acceptance_criteria": task_validation.require_acceptance_criteria,
+                    "task_require_definition_of_done": task_validation.require_definition_of_done,
+                    "task_require_outcome_based_definition_of_done": task_validation.require_outcome_based_definition_of_done,
+                },
+                "sources": {
+                    "worktrees_default": worktrees_default_source,
+                    "worktrees_dir": worktrees_dir_source,
+                    "auto_session_default": auto_session_default_source,
+                    "task_require_description": task_validation_sources.require_description,
+                    "task_require_acceptance_criteria": task_validation_sources.require_acceptance_criteria,
+                    "task_require_definition_of_done": task_validation_sources.require_definition_of_done,
+                    "task_require_outcome_based_definition_of_done": task_validation_sources.require_outcome_based_definition_of_done,
+                },
+                "paths": {
+                    "project_default": workmesh_core::config::config_path(repo_root),
+                    "global_default": global_config_path(),
+                }
+            });
+
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("Effective:");
+                println!(
+                    "- worktrees_default: {} ({})",
+                    worktrees_default, worktrees_default_source
+                );
+                if let Some((config, _)) = load_config_with_path(repo_root) {
+                    if let Some(value) = config.tasks_root.as_ref() {
+                        println!("- tasks_root: {} (project)", value);
+                    }
+                    if let Some(value) = config.state_root.as_ref() {
+                        println!("- state_root: {} (project)", value);
+                    }
+                    if let Some(value) = config.task_require_description {
+                        println!("- task_require_description: {} (project)", value);
+                    }
+                    if let Some(value) = config.task_require_acceptance_criteria {
+                        println!("- task_require_acceptance_criteria: {} (project)", value);
+                    }
+                    if let Some(value) = config.task_require_definition_of_done {
+                        println!("- task_require_definition_of_done: {} (project)", value);
+                    }
+                    if let Some(value) = config.task_require_outcome_based_definition_of_done {
+                        println!(
+                            "- task_require_outcome_based_definition_of_done: {} (project)",
+                            value
+                        );
+                    }
+                    if let Some(value) = config.root_dir.as_ref() {
+                        println!("- root_dir: {} (project, deprecated)", value);
+                    }
+                }
+                println!(
+                    "- task_require_description: {} ({})",
+                    task_validation.require_description,
+                    task_validation_sources.require_description
+                );
+                println!(
+                    "- task_require_acceptance_criteria: {} ({})",
+                    task_validation.require_acceptance_criteria,
+                    task_validation_sources.require_acceptance_criteria
+                );
+                println!(
+                    "- task_require_definition_of_done: {} ({})",
+                    task_validation.require_definition_of_done,
+                    task_validation_sources.require_definition_of_done
+                );
+                println!(
+                    "- task_require_outcome_based_definition_of_done: {} ({})",
+                    task_validation.require_outcome_based_definition_of_done,
+                    task_validation_sources.require_outcome_based_definition_of_done
+                );
+                if let Some(dir) = worktrees_dir.as_ref() {
+                    println!(
+                        "- worktrees_dir: {} ({})",
+                        dir.to_string_lossy(),
+                        worktrees_dir_source
+                    );
+                } else {
+                    println!("- worktrees_dir: (unset) ({})", worktrees_dir_source);
+                }
+                if let Some(value) = auto_session_default {
+                    println!(
+                        "- auto_session_default: {} ({})",
+                        value, auto_session_default_source
+                    );
+                } else {
+                    println!(
+                        "- auto_session_default: (unset) ({})",
+                        auto_session_default_source
+                    );
+                }
+                if let Some(project) = project.as_ref() {
+                    println!();
+                    println!(
+                        "Project config: {}",
+                        project["path"].as_str().unwrap_or("-")
+                    );
+                }
+                if let Some(global) = global.as_ref() {
+                    println!("Global config: {}", global["path"].as_str().unwrap_or("-"));
+                } else {
+                    println!("Global config: (missing)");
+                }
+            }
+        }
+        ConfigCommand::Set {
+            scope,
+            key,
+            value,
+            json,
+        } => {
+            let key = key.trim();
+            if key.is_empty() {
+                die("--key is required");
+            }
+            let value = value.trim();
+
+            let mut config = match scope {
+                ConfigScopeArg::Project => load_config(repo_root).unwrap_or_default(),
+                ConfigScopeArg::Global => load_global_config().unwrap_or_default(),
+            };
+
+            match key {
+                "worktrees_default" => {
+                    let parsed = parse_boolish(value).unwrap_or_else(|| {
+                        die("Invalid bool value for worktrees_default (expected true/false/1/0)");
+                    });
+                    config.worktrees_default = Some(parsed);
+                }
+                "worktrees_dir" => {
+                    if value.is_empty() {
+                        die("worktrees_dir cannot be blank (use config unset to remove)");
+                    }
+                    config.worktrees_dir = Some(value.to_string());
+                }
+                "auto_session_default" => {
+                    let parsed = parse_boolish(value).unwrap_or_else(|| {
+                        die(
+                            "Invalid bool value for auto_session_default (expected true/false/1/0)",
+                        );
+                    });
+                    config.auto_session_default = Some(parsed);
+                }
+                "tasks_root" => {
+                    if value.is_empty() {
+                        die("tasks_root cannot be blank (use config unset to remove)");
+                    }
+                    config.tasks_root = Some(value.to_string());
+                }
+                "state_root" => {
+                    if value.is_empty() {
+                        die("state_root cannot be blank (use config unset to remove)");
+                    }
+                    config.state_root = Some(value.to_string());
+                }
+                "task_require_description" => {
+                    let parsed = parse_boolish(value).unwrap_or_else(|| {
+                        die("Invalid bool value for task_require_description (expected true/false/1/0)");
+                    });
+                    config.task_require_description = Some(parsed);
+                }
+                "task_require_acceptance_criteria" => {
+                    let parsed = parse_boolish(value).unwrap_or_else(|| {
+                        die("Invalid bool value for task_require_acceptance_criteria (expected true/false/1/0)");
+                    });
+                    config.task_require_acceptance_criteria = Some(parsed);
+                }
+                "task_require_definition_of_done" => {
+                    let parsed = parse_boolish(value).unwrap_or_else(|| {
+                        die("Invalid bool value for task_require_definition_of_done (expected true/false/1/0)");
+                    });
+                    config.task_require_definition_of_done = Some(parsed);
+                }
+                "task_require_outcome_based_definition_of_done" => {
+                    let parsed = parse_boolish(value).unwrap_or_else(|| {
+                        die("Invalid bool value for task_require_outcome_based_definition_of_done (expected true/false/1/0)");
+                    });
+                    config.task_require_outcome_based_definition_of_done = Some(parsed);
+                }
+                "root_dir" => {
+                    if value.is_empty() {
+                        die("root_dir cannot be blank (use config unset to remove)");
+                    }
+                    config.root_dir = Some(value.to_string());
+                }
+                "do_not_migrate" => {
+                    let parsed = parse_boolish(value).unwrap_or_else(|| {
+                        die("Invalid bool value for do_not_migrate (expected true/false/1/0)");
+                    });
+                    config.do_not_migrate = Some(parsed);
+                }
+                _ => die(&format!("Unknown config key: {}", key)),
+            }
+
+            let path = match scope {
+                ConfigScopeArg::Project => write_config(repo_root, &config)?,
+                ConfigScopeArg::Global => write_global_config(&config)?,
+            };
+
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "scope": match scope { ConfigScopeArg::Project => "project", ConfigScopeArg::Global => "global" },
+                        "path": path,
+                        "config": config
+                    }))?
+                );
+            } else {
+                println!("Wrote {}", path.display());
+            }
+        }
+        ConfigCommand::Unset { scope, key, json } => {
+            let key = key.trim();
+            if key.is_empty() {
+                die("--key is required");
+            }
+
+            let mut config = match scope {
+                ConfigScopeArg::Project => load_config(repo_root).unwrap_or_default(),
+                ConfigScopeArg::Global => load_global_config().unwrap_or_default(),
+            };
+
+            match key {
+                "worktrees_default" => config.worktrees_default = None,
+                "worktrees_dir" => config.worktrees_dir = None,
+                "auto_session_default" => config.auto_session_default = None,
+                "tasks_root" => config.tasks_root = None,
+                "state_root" => config.state_root = None,
+                "task_require_description" => config.task_require_description = None,
+                "task_require_acceptance_criteria" => {
+                    config.task_require_acceptance_criteria = None
+                }
+                "task_require_definition_of_done" => config.task_require_definition_of_done = None,
+                "task_require_outcome_based_definition_of_done" => {
+                    config.task_require_outcome_based_definition_of_done = None
+                }
+                "root_dir" => config.root_dir = None,
+                "do_not_migrate" => config.do_not_migrate = None,
+                _ => die(&format!("Unknown config key: {}", key)),
+            }
+
+            let path = match scope {
+                ConfigScopeArg::Project => write_config(repo_root, &config)?,
+                ConfigScopeArg::Global => write_global_config(&config)?,
+            };
+
+            if *json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "scope": match scope { ConfigScopeArg::Project => "project", ConfigScopeArg::Global => "global" },
+                        "path": path,
+                        "config": config
+                    }))?
+                );
+            } else {
+                println!("Wrote {}", path.display());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_context_command(
+    backlog_dir: &Path,
+    repo_root: &Path,
+    command: ContextCommand,
+) -> Result<()> {
+    let state_key = "context";
+    let command_label = "Context";
+    let clear_action = "context_clear";
+    let set_action = "context_set";
+
+    match command {
+        ContextCommand::Set {
+            project,
+            epic,
+            objective,
+            tasks: task_list,
+            json,
+        } => {
+            let existing_workstream_id = load_context(backlog_dir)?
+                .and_then(|ctx| ctx.workstream_id)
+                .filter(|value| !value.trim().is_empty());
+            let inferred_project = infer_project_id(repo_root);
+            let inferred_epic_id = match epic {
+                Some(value) => Some(value),
+                None => {
+                    best_effort_git_branch(repo_root).and_then(|b| extract_task_id_from_branch(&b))
+                }
+            };
+            let task_ids = task_list
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .map(split_csv)
+                .unwrap_or_default();
+            let scope = if inferred_epic_id
+                .as_deref()
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false)
+            {
+                ContextScope {
+                    mode: ContextScopeMode::Epic,
+                    epic_id: inferred_epic_id.clone(),
+                    task_ids: Vec::new(),
+                }
+            } else if !task_ids.is_empty() {
+                ContextScope {
+                    mode: ContextScopeMode::Tasks,
+                    epic_id: None,
+                    task_ids: task_ids.clone(),
+                }
+            } else {
+                ContextScope {
+                    mode: ContextScopeMode::None,
+                    epic_id: None,
+                    task_ids: Vec::new(),
+                }
+            };
+
+            let state = ContextState {
+                version: 1,
+                project_id: project.or(inferred_project),
+                objective,
+                workstream_id: existing_workstream_id,
+                scope,
+                updated_at: None,
+            };
+            let path = save_context(backlog_dir, state.clone())?;
+            audit_event(
+                backlog_dir,
+                set_action,
+                state.scope.epic_id.as_deref(),
+                serde_json::json!({
+                    "project_id": state.project_id.clone(),
+                    "objective": state.objective.clone(),
+                    "scope": state.scope.clone()
+                }),
+            )?;
+
+            // If this worktree has an active workstream pointer, persist the updated context
+            // snapshot into the global workstream registry (best-effort).
+            if let Some(workstream_id) = state
+                .workstream_id
+                .as_deref()
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+            {
+                if let Ok(home) = resolve_workmesh_home() {
+                    let registry_repo_root = resolve_repo_root_for_registry(repo_root);
+                    let snapshot = WorkstreamContextSnapshot::from_context_state(&state);
+                    let _ = update_workstream_for_repo_by_id(
+                        &home,
+                        &registry_repo_root,
+                        workstream_id,
+                        |record| {
+                            record.context = Some(snapshot.clone());
+                        },
+                    );
+                }
+            }
+            if json {
+                let mut payload = serde_json::json!({
+                    "ok": true,
+                    "path": path
+                });
+                payload[state_key] = serde_json::to_value(&state)?;
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else {
+                println!("{} saved: {}", command_label, path.display());
+            }
+        }
+        ContextCommand::Show { json } => {
+            let context = infer_context_state(repo_root, backlog_dir);
+            if json {
+                let mut payload = serde_json::json!({
+                    "path": context_path(backlog_dir)
+                });
+                payload[state_key] = serde_json::to_value(&context)?;
+                println!("{}", serde_json::to_string_pretty(&payload)?);
+            } else if let Some(context) = context {
+                println!(
+                    "project_id: {}",
+                    context.project_id.unwrap_or_else(|| "(none)".into())
+                );
+                println!(
+                    "objective: {}",
+                    context.objective.unwrap_or_else(|| "(none)".into())
+                );
+                println!("scope.mode: {:?}", context.scope.mode);
+                if let Some(epic_id) = context.scope.epic_id.as_deref() {
+                    println!("scope.epic_id: {}", epic_id);
+                }
+                if !context.scope.task_ids.is_empty() {
+                    println!("scope.task_ids: {}", context.scope.task_ids.join(", "));
+                }
+                println!();
+                println!("Next:");
+                println!("- workmesh --root . ready --json");
+                println!("- workmesh --root . claim <task-id> <owner> --minutes 60");
+            } else {
+                println!("(no {} set)", state_key);
+            }
+        }
+        ContextCommand::Clear { json } => {
+            let cleared = clear_context(backlog_dir)?;
+            if cleared {
+                audit_event(backlog_dir, clear_action, None, serde_json::json!({}))?;
+            }
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "ok": true,
+                        "cleared": cleared
+                    }))?
+                );
+            } else if cleared {
+                println!("{} cleared", command_label);
+            } else {
+                println!("(no {} to clear)", state_key);
+            }
+        }
+    }
+
+    Ok(())
+}
+
+fn handle_migrate_workflow(root: &Path, command: &MigrateCommand) -> Result<()> {
+    match command {
+        MigrateCommand::Audit { json } => {
+            let report = audit_deprecations(root)?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else if report.findings.is_empty() {
+                println!("No legacy/deprecated structures detected.");
+            } else {
+                println!("Detected {} finding(s):", report.findings.len());
+                for finding in report.findings {
+                    println!(
+                        "- [{}] {} ({})",
+                        finding.severity, finding.title, finding.id
+                    );
+                    if let Some(action) = finding.suggested_action {
+                        println!("  suggested_action: {}", action);
+                    }
+                }
+            }
+        }
+        MigrateCommand::Plan {
+            include,
+            exclude,
+            json,
+        } => {
+            let report = audit_deprecations(root)?;
+            let plan = plan_migrations(
+                &report,
+                &MigrationPlanOptions {
+                    include: include.clone(),
+                    exclude: exclude.clone(),
+                },
+            );
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&plan)?);
+            } else if plan.steps.is_empty() {
+                println!("No migration steps required.");
+            } else {
+                println!("Migration plan:");
+                for (idx, step) in plan.steps.iter().enumerate() {
+                    println!(
+                        "{}. {} [{}] - {}",
+                        idx + 1,
+                        step.action,
+                        if step.required {
+                            "required"
+                        } else {
+                            "recommended"
+                        },
+                        step.reason
+                    );
+                }
+                if !plan.warnings.is_empty() {
+                    println!("Warnings:");
+                    for warning in plan.warnings {
+                        println!("- {}", warning);
+                    }
+                }
+            }
+        }
+        MigrateCommand::Apply {
+            include,
+            exclude,
+            apply,
+            backup,
+            json,
+        } => {
+            let report = audit_deprecations(root)?;
+            let plan = plan_migrations(
+                &report,
+                &MigrationPlanOptions {
+                    include: include.clone(),
+                    exclude: exclude.clone(),
+                },
+            );
+            let result = apply_migration_plan(
+                root,
+                &plan,
+                &MigrationApplyOptions {
+                    dry_run: !*apply,
+                    backup: *backup,
+                },
+            )?;
+            if *json {
+                println!("{}", serde_json::to_string_pretty(&result)?);
+            } else {
+                if !*apply {
+                    println!("Dry-run migration complete (no files changed).");
+                    println!("Use `workmesh --root . migrate apply --apply` to write changes.");
+                }
+                println!("Applied: {}", result.applied.len());
+                for step in result.applied {
+                    println!("- {}", step);
+                }
+                if !result.skipped.is_empty() {
+                    println!("Skipped:");
+                    for step in result.skipped {
+                        println!("- {}", step);
+                    }
+                }
+                if !result.backups.is_empty() {
+                    println!("Backups:");
+                    for path in result.backups {
+                        println!("- {}", path);
+                    }
+                }
+                if !result.warnings.is_empty() {
+                    println!("Warnings:");
+                    for warning in result.warnings {
+                        println!("- {}", warning);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_context_state(backlog_dir: &Path) -> Option<ContextState> {
+    if let Ok(Some(context)) = load_context(backlog_dir) {
+        return Some(context);
+    }
+    // Legacy fallback for repos not yet migrated.
+    let legacy = load_focus(backlog_dir).ok().flatten()?;
+    Some(workmesh_core::context::context_from_legacy_focus(
+        legacy.project_id,
+        legacy.epic_id,
+        legacy.objective,
+        legacy.working_set,
+    ))
+}
+
+fn infer_context_state(repo_root: &Path, backlog_dir: &Path) -> Option<ContextState> {
+    if let Some(existing) = load_context_state(backlog_dir) {
+        return Some(existing);
+    }
+    let inferred_project = infer_project_id(repo_root);
+    let inferred_epic =
+        best_effort_git_branch(repo_root).and_then(|b| extract_task_id_from_branch(&b));
+    if inferred_project.is_none() && inferred_epic.is_none() {
+        return None;
+    }
+    let mut scope = ContextScope {
+        mode: ContextScopeMode::None,
+        epic_id: None,
+        task_ids: Vec::new(),
+    };
+    if let Some(epic_id) = inferred_epic {
+        scope.mode = ContextScopeMode::Epic;
+        scope.epic_id = Some(epic_id);
+    }
+    Some(ContextState {
+        version: 1,
+        project_id: inferred_project,
+        objective: None,
+        workstream_id: None,
+        scope,
+        updated_at: None,
+    })
+}
+
+fn handle_bulk_set_status(
+    backlog_dir: &Path,
+    tasks: &[Task],
+    task_rules: &workmesh_core::config::TaskValidationRules,
+    task_ids: Vec<String>,
+    status: String,
+    touch: bool,
+    json: bool,
+    auto_checkpoint: bool,
+    auto_session: bool,
+) -> Result<()> {
+    let ids = normalize_task_ids(split_list(&task_ids));
+    if ids.is_empty() {
+        die("No tasks provided");
+    }
+    let (selected, missing) = select_tasks_with_missing(tasks, &ids);
+    let mut updated = Vec::new();
+    for task in selected {
+        if let Err(err) = ensure_can_set_status_with_rules(tasks, task, &status, task_rules) {
+            die(&err);
+        }
+        let path = task.file_path.as_ref().unwrap_or_else(|| {
+            die(&format!("Task not found: {}", task.id));
+        });
+        update_task_field(path, "status", Some(FieldValue::Scalar(status.clone())))?;
+        if touch || is_done_status(&status) {
+            update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+        }
+        audit_event(
+            backlog_dir,
+            "bulk_set_status",
+            Some(&task.id),
+            serde_json::json!({ "status": status.clone() }),
+        )?;
+        updated.push(task.id.clone());
+    }
+    refresh_index_best_effort(backlog_dir);
+    maybe_auto_checkpoint(backlog_dir, auto_checkpoint, auto_session);
+    emit_bulk_result(&updated, &missing, json);
+    Ok(())
+}
+
+fn handle_bulk_set_field(
+    backlog_dir: &Path,
+    tasks: &[Task],
+    task_rules: &workmesh_core::config::TaskValidationRules,
+    task_ids: Vec<String>,
+    field: String,
+    value: String,
+    touch: bool,
+    json: bool,
+    auto_checkpoint: bool,
+    auto_session: bool,
+) -> Result<()> {
+    let ids = normalize_task_ids(split_list(&task_ids));
+    if ids.is_empty() {
+        die("No tasks provided");
+    }
+    let (selected, missing) = select_tasks_with_missing(tasks, &ids);
+    let mut updated = Vec::new();
+    for task in selected {
+        if is_status_field(&field) {
+            if let Err(err) = ensure_can_set_status_with_rules(tasks, task, &value, task_rules) {
+                die(&err);
+            }
+        }
+        let path = task.file_path.as_ref().unwrap_or_else(|| {
+            die(&format!("Task not found: {}", task.id));
+        });
+        update_task_field_or_section(path, &field, Some(&value))?;
+        if touch {
+            update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+        }
+        audit_event(
+            backlog_dir,
+            "bulk_set_field",
+            Some(&task.id),
+            serde_json::json!({ "field": field.clone(), "value": value.clone() }),
+        )?;
+        updated.push(task.id.clone());
+    }
+    refresh_index_best_effort(backlog_dir);
+    maybe_auto_checkpoint(backlog_dir, auto_checkpoint, auto_session);
+    emit_bulk_result(&updated, &missing, json);
+    Ok(())
+}
+
+fn handle_bulk_label_add(
+    backlog_dir: &Path,
+    tasks: &[Task],
+    task_ids: Vec<String>,
+    label: String,
+    touch: bool,
+    json: bool,
+    auto_checkpoint: bool,
+    auto_session: bool,
+) -> Result<()> {
+    let ids = normalize_task_ids(split_list(&task_ids));
+    if ids.is_empty() {
+        die("No tasks provided");
+    }
+    let (selected, missing) = select_tasks_with_missing(tasks, &ids);
+    let mut updated = Vec::new();
+    for task in selected {
+        let path = task.file_path.as_ref().unwrap_or_else(|| {
+            die(&format!("Task not found: {}", task.id));
+        });
+        let mut current = task.labels.clone();
+        if !current.contains(&label) {
+            current.push(label.clone());
+        }
+        set_list_field(path, "labels", current)?;
+        if touch {
+            update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+        }
+        audit_event(
+            backlog_dir,
+            "bulk_label_add",
+            Some(&task.id),
+            serde_json::json!({ "label": label.clone() }),
+        )?;
+        updated.push(task.id.clone());
+    }
+    refresh_index_best_effort(backlog_dir);
+    maybe_auto_checkpoint(backlog_dir, auto_checkpoint, auto_session);
+    emit_bulk_result(&updated, &missing, json);
+    Ok(())
+}
+
+fn handle_bulk_label_remove(
+    backlog_dir: &Path,
+    tasks: &[Task],
+    task_ids: Vec<String>,
+    label: String,
+    touch: bool,
+    json: bool,
+    auto_checkpoint: bool,
+    auto_session: bool,
+) -> Result<()> {
+    let ids = normalize_task_ids(split_list(&task_ids));
+    if ids.is_empty() {
+        die("No tasks provided");
+    }
+    let (selected, missing) = select_tasks_with_missing(tasks, &ids);
+    let mut updated = Vec::new();
+    for task in selected {
+        let path = task.file_path.as_ref().unwrap_or_else(|| {
+            die(&format!("Task not found: {}", task.id));
+        });
+        let mut current = task.labels.clone();
+        current.retain(|entry| entry != &label);
+        set_list_field(path, "labels", current)?;
+        if touch {
+            update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+        }
+        audit_event(
+            backlog_dir,
+            "bulk_label_remove",
+            Some(&task.id),
+            serde_json::json!({ "label": label.clone() }),
+        )?;
+        updated.push(task.id.clone());
+    }
+    refresh_index_best_effort(backlog_dir);
+    maybe_auto_checkpoint(backlog_dir, auto_checkpoint, auto_session);
+    emit_bulk_result(&updated, &missing, json);
+    Ok(())
+}
+
+fn handle_bulk_dep_add(
+    backlog_dir: &Path,
+    tasks: &[Task],
+    task_ids: Vec<String>,
+    dependency: String,
+    touch: bool,
+    json: bool,
+    auto_checkpoint: bool,
+    auto_session: bool,
+) -> Result<()> {
+    let ids = normalize_task_ids(split_list(&task_ids));
+    if ids.is_empty() {
+        die("No tasks provided");
+    }
+    let (selected, missing) = select_tasks_with_missing(tasks, &ids);
+    let mut updated = Vec::new();
+    for task in selected {
+        let path = task.file_path.as_ref().unwrap_or_else(|| {
+            die(&format!("Task not found: {}", task.id));
+        });
+        let mut current = task.dependencies.clone();
+        if !current.contains(&dependency) {
+            current.push(dependency.clone());
+        }
+        set_list_field(path, "dependencies", current)?;
+        if touch {
+            update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+        }
+        audit_event(
+            backlog_dir,
+            "bulk_dependency_add",
+            Some(&task.id),
+            serde_json::json!({ "dependency": dependency.clone() }),
+        )?;
+        updated.push(task.id.clone());
+    }
+    refresh_index_best_effort(backlog_dir);
+    maybe_auto_checkpoint(backlog_dir, auto_checkpoint, auto_session);
+    emit_bulk_result(&updated, &missing, json);
+    Ok(())
+}
+
+fn handle_bulk_dep_remove(
+    backlog_dir: &Path,
+    tasks: &[Task],
+    task_ids: Vec<String>,
+    dependency: String,
+    touch: bool,
+    json: bool,
+    auto_checkpoint: bool,
+    auto_session: bool,
+) -> Result<()> {
+    let ids = normalize_task_ids(split_list(&task_ids));
+    if ids.is_empty() {
+        die("No tasks provided");
+    }
+    let (selected, missing) = select_tasks_with_missing(tasks, &ids);
+    let mut updated = Vec::new();
+    for task in selected {
+        let path = task.file_path.as_ref().unwrap_or_else(|| {
+            die(&format!("Task not found: {}", task.id));
+        });
+        let mut current = task.dependencies.clone();
+        current.retain(|entry| entry != &dependency);
+        set_list_field(path, "dependencies", current)?;
+        if touch {
+            update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+        }
+        audit_event(
+            backlog_dir,
+            "bulk_dependency_remove",
+            Some(&task.id),
+            serde_json::json!({ "dependency": dependency.clone() }),
+        )?;
+        updated.push(task.id.clone());
+    }
+    refresh_index_best_effort(backlog_dir);
+    maybe_auto_checkpoint(backlog_dir, auto_checkpoint, auto_session);
+    emit_bulk_result(&updated, &missing, json);
+    Ok(())
+}
+
+fn handle_bulk_note(
+    backlog_dir: &Path,
+    tasks: &[Task],
+    task_ids: Vec<String>,
+    note: String,
+    section: NoteSection,
+    touch: bool,
+    json: bool,
+    auto_checkpoint: bool,
+    auto_session: bool,
+) -> Result<()> {
+    let ids = normalize_task_ids(split_list(&task_ids));
+    if ids.is_empty() {
+        die("No tasks provided");
+    }
+    let (selected, missing) = select_tasks_with_missing(tasks, &ids);
+    let mut updated = Vec::new();
+    for task in selected {
+        let path = task.file_path.as_ref().unwrap_or_else(|| {
+            die(&format!("Task not found: {}", task.id));
+        });
+        let new_body = append_note(&task.body, &note, section.as_str());
+        update_body(path, &new_body)?;
+        if touch {
+            update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+        }
+        audit_event(
+            backlog_dir,
+            "bulk_note",
+            Some(&task.id),
+            serde_json::json!({ "section": section.as_str(), "note": note }),
+        )?;
+        updated.push(task.id.clone());
+    }
+    refresh_index_best_effort(backlog_dir);
+    maybe_auto_checkpoint(backlog_dir, auto_checkpoint, auto_session);
+    emit_bulk_result(&updated, &missing, json);
+    Ok(())
+}
+
+fn best_practices_text() -> &'static str {
+    "workmesh best practices
+
+Task quality:
+- Fill `Description`, `Acceptance Criteria`, and `Definition of Done` for every task.
+- `Definition of Done` must include outcome-based completion criteria, not only hygiene checks.
+- `Done` transitions are gated: tasks must satisfy quality requirements before completion.
+
+Task organization:
+- Active task and epic Markdown files may be nested recursively under `tasks/`.
+- Product/domain repos can use `tasks/<product-or-domain>/<initiative>/<feature>/`.
+- Customer/client-heavy repos can use `tasks/<customer>/<project>/<application-or-service>/<feature>/`.
+- Use directories for human navigation; task id and front matter remains the source of truth.
+- Preserve `id`, `kind`, `relationships.parent`, `dependencies`, `labels`, `phase`, and `status` when reorganizing files.
+
+Dependencies:
+- Add dependencies whenever a task is blocked by other work.
+- Prefer explicit task ids (task-042) over vague references.
+- Update dependencies as status changes to avoid stale blockers.
+- Use validate to catch missing or broken dependency chains.
+
+Archive:
+- Archive writes use `archive/<yyyy>/<mm>/<status>/<relative-task-path>`.
+- Date comes first, then normalized status, then the original path below `tasks/`.
+- Legacy `archive/YYYY-MM/` files remain readable by archive-aware views.
+
+Derived files:
+- Ignore derived artifacts like `.workmesh/.index/` and `.workmesh/.audit.log` in git.
+- If they show up as changes, rebuild/refresh and do not commit them.
+
+Labels:
+- Use labels to group work (docs, infra, ops).
+- Keep labels short and consistent.
+
+Notes:
+- Capture blockers or decisions in notes for future context.
+"
+}
+
+fn update_list_field(
+    backlog_dir: &Path,
+    tasks: &[Task],
+    task_id: &str,
+    field: &str,
+    value: &str,
+    add: bool,
+    touch: bool,
+) -> Result<()> {
+    let task = find_task(tasks, task_id).unwrap_or_else(|| {
+        die(&format!("Task not found: {}", task_id));
+    });
+    let path = task.file_path.as_ref().unwrap_or_else(|| {
+        die(&format!("Task not found: {}", task_id));
+    });
+    let mut current = match field {
+        "labels" => task.labels.clone(),
+        "dependencies" => task.dependencies.clone(),
+        _ => Vec::new(),
+    };
+    let value = value.trim();
+    if add {
+        if !current.contains(&value.to_string()) {
+            current.push(value.to_string());
+        }
+    } else {
+        current.retain(|entry| entry != value);
+    }
+    set_list_field(path, field, current)?;
+    if touch {
+        update_task_field(path, "updated_date", Some(now_timestamp().into()))?;
+    }
+    let action = match (field, add) {
+        ("labels", true) => "label_add",
+        ("labels", false) => "label_remove",
+        ("dependencies", true) => "dependency_add",
+        ("dependencies", false) => "dependency_remove",
+        _ => "update_list",
+    };
+    audit_event(
+        backlog_dir,
+        action,
+        Some(&task.id),
+        serde_json::json!({ "field": field, "value": value, "add": add }),
+    )?;
+    refresh_index_best_effort(backlog_dir);
+    let action = if add { "Added" } else { "Removed" };
+    println!("{} {} on {} {}", action, value, task.id, field);
+    Ok(())
+}
+
+fn read_content(text: Option<&str>, file_path: Option<&Path>) -> Result<String> {
+    if let Some(path) = file_path {
+        return Ok(std::fs::read_to_string(path)?);
+    }
+    if let Some(text) = text {
+        return Ok(text.to_string());
+    }
+    let mut buffer = String::new();
+    std::io::stdin().read_to_string(&mut buffer)?;
+    Ok(buffer)
+}
+
+fn parse_json_or_string(raw: String) -> serde_json::Value {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        serde_json::Value::String(raw)
+    } else {
+        serde_json::from_str(trimmed).unwrap_or(serde_json::Value::String(raw))
+    }
+}
+
+fn read_render_data(args: &RenderInputArgs) -> Result<serde_json::Value> {
+    let raw = match (&args.data, &args.data_file, args.stdin) {
+        (Some(data), None, false) => data.clone(),
+        (None, Some(path), false) => std::fs::read_to_string(path)?,
+        (None, None, true) => {
+            let mut buffer = String::new();
+            std::io::stdin().read_to_string(&mut buffer)?;
+            buffer
+        }
+        (None, None, false) => {
+            anyhow::bail!("render input requires one of --data, --data-file, or --stdin")
+        }
+        _ => anyhow::bail!("render input flags are mutually exclusive"),
+    };
+    Ok(parse_json_or_string(raw))
+}
+
+fn read_render_configuration(args: &RenderInputArgs) -> Result<Option<serde_json::Value>> {
+    let raw = match (&args.configuration, &args.config_file) {
+        (Some(value), None) => value.clone(),
+        (None, Some(path)) => std::fs::read_to_string(path)?,
+        (None, None) => return Ok(None),
+        _ => anyhow::bail!("render configuration flags are mutually exclusive"),
+    };
+    let value = serde_json::from_str(raw.trim())
+        .map_err(|err| anyhow::anyhow!("invalid render configuration JSON: {}", err))?;
+    Ok(Some(value))
+}
+
+fn render_tool_name(command: &RenderCommand) -> &'static str {
+    match command {
+        RenderCommand::Table(_) => "render_table",
+        RenderCommand::Kv(_) => "render_kv",
+        RenderCommand::Stats(_) => "render_stats",
+        RenderCommand::List(_) => "render_list",
+        RenderCommand::Progress(_) => "render_progress",
+        RenderCommand::Tree(_) => "render_tree",
+        RenderCommand::Diff(_) => "render_diff",
+        RenderCommand::Logs(_) => "render_logs",
+        RenderCommand::Alerts(_) => "render_alerts",
+        RenderCommand::ChartBar(_) => "render_chart_bar",
+        RenderCommand::Sparkline(_) => "render_sparkline",
+        RenderCommand::Timeline(_) => "render_timeline",
+    }
+}
+
+fn render_args(command: &RenderCommand) -> &RenderInputArgs {
+    match command {
+        RenderCommand::Table(args)
+        | RenderCommand::Kv(args)
+        | RenderCommand::Stats(args)
+        | RenderCommand::List(args)
+        | RenderCommand::Progress(args)
+        | RenderCommand::Tree(args)
+        | RenderCommand::Diff(args)
+        | RenderCommand::Logs(args)
+        | RenderCommand::Alerts(args)
+        | RenderCommand::ChartBar(args)
+        | RenderCommand::Sparkline(args)
+        | RenderCommand::Timeline(args) => args,
+    }
+}
+
+fn handle_render_command(command: &RenderCommand) -> Result<()> {
+    let args = render_args(command);
+    let mut payload = serde_json::Map::new();
+    payload.insert("data".to_string(), read_render_data(args)?);
+    if let Some(format) = args.format.as_ref() {
+        payload.insert(
+            "format".to_string(),
+            serde_json::Value::String(format.clone()),
+        );
+    }
+    if let Some(configuration) = read_render_configuration(args)? {
+        payload.insert("configuration".to_string(), configuration);
+    }
+    let result = render_dispatch_tool(
+        render_tool_name(command),
+        &serde_json::Value::Object(payload),
+    )
+    .map_err(|err| anyhow::anyhow!(err.to_string()))?;
+    if let Some(text) = result.get("text").and_then(|value| value.as_str()) {
+        print!("{}", text);
+        if !text.ends_with('\n') {
+            println!();
+        }
+    } else {
+        println!("{}", serde_json::to_string_pretty(&result)?);
+    }
+    Ok(())
+}
+
+fn audit_event(
+    backlog_dir: &Path,
+    action: &str,
+    task_id: Option<&str>,
+    details: serde_json::Value,
+) -> Result<()> {
+    let actor = std::env::var("USER").ok();
+    let event = AuditEvent {
+        timestamp: now_timestamp(),
+        actor,
+        action: action.to_string(),
+        task_id: task_id.map(|value| value.to_string()),
+        details,
+    };
+    append_audit_event(backlog_dir, &event)?;
+    Ok(())
+}
+
+fn auto_checkpoint_enabled(cli: &Cli) -> bool {
+    if cli.auto_checkpoint {
+        return true;
+    }
+    env_flag_true("WORKMESH_AUTO_CHECKPOINT")
+}
+
+fn auto_session_enabled(cli: &Cli, repo_root: &Path) -> bool {
+    if cli.auto_session_save {
+        return true;
+    }
+    if cli.no_auto_session_save {
+        return false;
+    }
+    if let Some(value) = env_flag("WORKMESH_AUTO_SESSION") {
+        return value;
+    }
+    if let Some(value) = resolve_auto_session_default(repo_root) {
+        return value;
+    }
+    let interactive = io::stdin().is_terminal() && io::stdout().is_terminal();
+    let ci = env_flag("CI").unwrap_or_else(|| std::env::var_os("CI").is_some());
+    interactive && !ci
+}
+
+fn env_flag(name: &str) -> Option<bool> {
+    std::env::var(name)
+        .ok()
+        .and_then(|value| parse_boolish(&value))
+}
+
+fn parse_boolish(value: &str) -> Option<bool> {
+    match value.trim().to_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn env_flag_true(name: &str) -> bool {
+    env_flag(name).unwrap_or(false)
+}
+
+fn maybe_auto_checkpoint(backlog_dir: &Path, auto_checkpoint: bool, auto_session: bool) {
+    if auto_checkpoint {
+        let tasks = load_tasks(backlog_dir);
+        let options = CheckpointOptions {
+            project_id: None,
+            checkpoint_id: None,
+            audit_limit: 10,
+        };
+        let _ = write_checkpoint(backlog_dir, &tasks, &options);
+    }
+
+    if auto_session {
+        let _ = auto_update_current_session(backlog_dir);
+    }
+}
+
+fn refresh_index_best_effort(backlog_dir: &Path) {
+    let _ = refresh_index(backlog_dir);
+}
+
+fn die(message: &str) -> ! {
+    eprintln!("{}", message);
+    std::process::exit(1);
+}

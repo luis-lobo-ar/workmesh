@@ -1,0 +1,666 @@
+use std::collections::HashSet;
+use std::fs;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use crate::backlog::{resolve_backlog, BacklogError, BacklogLayout, BacklogResolution};
+use crate::config::{load_config, update_do_not_migrate, ConfigError};
+use crate::context::{context_from_legacy_focus, context_path, load_context, save_context};
+use crate::focus::{focus_path, load_focus};
+use crate::global_sessions::{
+    append_session_saved, load_sessions_latest, rebuild_sessions_index, resolve_workmesh_home,
+    set_current_session, AgentSession, HandoffSummary,
+};
+use crate::migration::{migrate_backlog, MigrationError};
+use crate::task::load_tasks;
+use crate::task_ops::{evaluate_task_quality, normalize_task_required_sections};
+use crate::truth::{apply_truth_migration, truth_migration_audit, truth_migration_plan};
+
+#[derive(Debug, Error)]
+pub enum MigrationAuditError {
+    #[error("Backlog resolution failed: {0}")]
+    Backlog(#[from] BacklogError),
+    #[error("Migration failed: {0}")]
+    Migration(#[from] MigrationError),
+    #[error("Context conversion failed: {0}")]
+    Context(#[from] anyhow::Error),
+    #[error("Config update failed: {0}")]
+    Config(#[from] ConfigError),
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+    #[error("Task update failed: {0}")]
+    Task(#[from] crate::task::TaskParseError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MigrationActionKind {
+    LayoutToSplit,
+    FocusToContext,
+    TaskSectionNormalization,
+    TruthBackfill,
+    SessionHandoffEnrichment,
+    ConfigCleanup,
+}
+
+impl MigrationActionKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::LayoutToSplit => "layout_to_split",
+            Self::FocusToContext => "focus_to_context",
+            Self::TaskSectionNormalization => "task_section_normalization",
+            Self::TruthBackfill => "truth_backfill",
+            Self::SessionHandoffEnrichment => "session_handoff_enrichment",
+            Self::ConfigCleanup => "config_cleanup",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim().to_lowercase().as_str() {
+            "layout_to_split" | "layout_backlog_to_workmesh" => Some(Self::LayoutToSplit),
+            "focus_to_context" => Some(Self::FocusToContext),
+            "task_section_normalization" => Some(Self::TaskSectionNormalization),
+            "truth_backfill" => Some(Self::TruthBackfill),
+            "session_handoff_enrichment" => Some(Self::SessionHandoffEnrichment),
+            "config_cleanup" => Some(Self::ConfigCleanup),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationFinding {
+    pub id: String,
+    pub title: String,
+    pub severity: String,
+    pub details: serde_json::Value,
+    pub suggested_action: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationAuditReport {
+    pub repo_root: String,
+    pub backlog_dir: String,
+    pub layout: String,
+    pub findings: Vec<MigrationFinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationPlanStep {
+    pub action: String,
+    pub required: bool,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationPlan {
+    pub repo_root: String,
+    pub steps: Vec<MigrationPlanStep>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MigrationPlanOptions {
+    pub include: Vec<String>,
+    pub exclude: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct MigrationApplyOptions {
+    pub dry_run: bool,
+    pub backup: bool,
+}
+
+impl Default for MigrationApplyOptions {
+    fn default() -> Self {
+        Self {
+            dry_run: true,
+            backup: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MigrationApplyResult {
+    pub applied: Vec<String>,
+    pub skipped: Vec<String>,
+    pub warnings: Vec<String>,
+    pub backups: Vec<String>,
+}
+
+pub fn layout_name(layout: BacklogLayout) -> &'static str {
+    match layout {
+        BacklogLayout::Split => "split",
+        BacklogLayout::Workmesh => "workmesh",
+        BacklogLayout::HiddenWorkmesh => ".workmesh",
+        BacklogLayout::Backlog => "backlog",
+        BacklogLayout::Project => "project",
+        BacklogLayout::RootTasks => "root/tasks",
+        BacklogLayout::TasksDir => "tasks-dir",
+        BacklogLayout::Custom => "custom",
+    }
+}
+
+pub fn audit_deprecations(root: &Path) -> Result<MigrationAuditReport, MigrationAuditError> {
+    let resolution = resolve_backlog(root)?;
+    let mut findings = Vec::new();
+
+    if resolution.layout.is_legacy() {
+        findings.push(MigrationFinding {
+            id: "legacy_layout".to_string(),
+            title: "Legacy backlog layout detected".to_string(),
+            severity: "required".to_string(),
+            details: serde_json::json!({
+                "layout": layout_name(resolution.layout),
+                "from": resolution.state_root,
+                "target_state_root": resolution.repo_root.join(".workmesh"),
+                "target_tasks_root": resolution.repo_root.join("tasks"),
+            }),
+            suggested_action: Some(MigrationActionKind::LayoutToSplit.as_str().into()),
+        });
+    }
+
+    let legacy_focus_path = focus_path(&resolution.state_root);
+    let has_legacy_focus = legacy_focus_path.exists();
+    let has_context = context_path(&resolution.state_root).exists();
+    if has_legacy_focus {
+        findings.push(MigrationFinding {
+            id: "legacy_focus".to_string(),
+            title: "Deprecated focus.json detected".to_string(),
+            severity: "required".to_string(),
+            details: serde_json::json!({
+                "path": legacy_focus_path,
+                "replacement": context_path(&resolution.state_root),
+            }),
+            suggested_action: Some(MigrationActionKind::FocusToContext.as_str().into()),
+        });
+    } else if !has_context {
+        findings.push(MigrationFinding {
+            id: "missing_context".to_string(),
+            title: "No context.json found".to_string(),
+            severity: "recommended".to_string(),
+            details: serde_json::json!({
+                "path": context_path(&resolution.state_root),
+                "state_root": resolution.state_root.to_string_lossy().to_string(),
+            }),
+            suggested_action: Some(MigrationActionKind::FocusToContext.as_str().into()),
+        });
+    }
+
+    if let Some(config) = load_config(&resolution.repo_root) {
+        if config.do_not_migrate.unwrap_or(false) {
+            findings.push(MigrationFinding {
+                id: "deprecated_config_do_not_migrate".to_string(),
+                title: "Deprecated do_not_migrate=true config found".to_string(),
+                severity: "recommended".to_string(),
+                details: serde_json::json!({
+                    "config_root": resolution.repo_root,
+                }),
+                suggested_action: Some(MigrationActionKind::ConfigCleanup.as_str().into()),
+            });
+        }
+    }
+
+    if let Ok(truth_audit) = truth_migration_audit(&resolution.state_root) {
+        if !truth_audit.candidates.is_empty() {
+            findings.push(MigrationFinding {
+                id: "legacy_truth_candidates".to_string(),
+                title: "Legacy decision notes found for Truth Ledger backfill".to_string(),
+                severity: "recommended".to_string(),
+                details: serde_json::json!({
+                    "candidate_count": truth_audit.candidates.len(),
+                }),
+                suggested_action: Some(MigrationActionKind::TruthBackfill.as_str().into()),
+            });
+        }
+    }
+
+    let tasks = load_tasks(&resolution.state_root);
+    let mut section_candidates = Vec::new();
+    for task in tasks {
+        let quality = evaluate_task_quality(&task);
+        if quality.missing_sections.is_empty() {
+            continue;
+        }
+        section_candidates.push(serde_json::json!({
+            "id": task.id,
+            "missing_sections": quality.missing_sections,
+        }));
+    }
+    if !section_candidates.is_empty() {
+        findings.push(MigrationFinding {
+            id: "legacy_task_sections".to_string(),
+            title: "Legacy task files missing required sections".to_string(),
+            severity: "recommended".to_string(),
+            details: serde_json::json!({
+                "candidate_count": section_candidates.len(),
+                "candidates": section_candidates,
+            }),
+            suggested_action: Some(
+                MigrationActionKind::TaskSectionNormalization
+                    .as_str()
+                    .into(),
+            ),
+        });
+    }
+
+    if let Ok(home) = resolve_workmesh_home() {
+        if let Ok(sessions) = load_sessions_latest(&home) {
+            let missing = sessions.iter().filter(|s| s.handoff.is_none()).count();
+            if missing > 0 {
+                findings.push(MigrationFinding {
+                    id: "legacy_sessions_missing_handoff".to_string(),
+                    title: "Global sessions missing structured handoff".to_string(),
+                    severity: "recommended".to_string(),
+                    details: serde_json::json!({
+                        "home": home,
+                        "missing_count": missing,
+                    }),
+                    suggested_action: Some(
+                        MigrationActionKind::SessionHandoffEnrichment
+                            .as_str()
+                            .into(),
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(MigrationAuditReport {
+        repo_root: resolution.repo_root.to_string_lossy().to_string(),
+        backlog_dir: resolution.state_root.to_string_lossy().to_string(),
+        layout: layout_name(resolution.layout).to_string(),
+        findings,
+    })
+}
+
+pub fn plan_migrations(
+    report: &MigrationAuditReport,
+    opts: &MigrationPlanOptions,
+) -> MigrationPlan {
+    let include: HashSet<MigrationActionKind> = opts
+        .include
+        .iter()
+        .filter_map(|v| MigrationActionKind::from_str(v))
+        .collect();
+    let exclude: HashSet<MigrationActionKind> = opts
+        .exclude
+        .iter()
+        .filter_map(|v| MigrationActionKind::from_str(v))
+        .collect();
+
+    let mut wants = Vec::<MigrationActionKind>::new();
+    for finding in &report.findings {
+        if let Some(action) = finding
+            .suggested_action
+            .as_deref()
+            .and_then(MigrationActionKind::from_str)
+        {
+            if !wants.contains(&action) {
+                wants.push(action);
+            }
+        }
+    }
+
+    let order = [
+        MigrationActionKind::LayoutToSplit,
+        MigrationActionKind::FocusToContext,
+        MigrationActionKind::TaskSectionNormalization,
+        MigrationActionKind::TruthBackfill,
+        MigrationActionKind::SessionHandoffEnrichment,
+        MigrationActionKind::ConfigCleanup,
+    ];
+
+    let mut steps = Vec::new();
+    let mut warnings = Vec::new();
+    for action in order {
+        if !wants.contains(&action) {
+            continue;
+        }
+        if !include.is_empty() && !include.contains(&action) {
+            continue;
+        }
+        if exclude.contains(&action) {
+            warnings.push(format!("excluded action {}", action.as_str()));
+            continue;
+        }
+        let required = matches!(
+            action,
+            MigrationActionKind::LayoutToSplit | MigrationActionKind::FocusToContext
+        );
+        steps.push(MigrationPlanStep {
+            action: action.as_str().to_string(),
+            required,
+            reason: reason_for_action(action).to_string(),
+        });
+    }
+
+    MigrationPlan {
+        repo_root: report.repo_root.clone(),
+        steps,
+        warnings,
+    }
+}
+
+fn reason_for_action(action: MigrationActionKind) -> &'static str {
+    match action {
+        MigrationActionKind::LayoutToSplit => "normalize repo layout to tasks/ + .workmesh/",
+        MigrationActionKind::FocusToContext => {
+            "replace deprecated focus orchestration with context.json"
+        }
+        MigrationActionKind::TaskSectionNormalization => {
+            "normalize legacy task bodies to include required sections"
+        }
+        MigrationActionKind::TruthBackfill => {
+            "backfill legacy decision notes into structured truth records"
+        }
+        MigrationActionKind::SessionHandoffEnrichment => {
+            "enrich global sessions with structured handoff fields"
+        }
+        MigrationActionKind::ConfigCleanup => "remove deprecated migration suppression flag",
+    }
+}
+
+pub fn apply_migration_plan(
+    root: &Path,
+    plan: &MigrationPlan,
+    opts: &MigrationApplyOptions,
+) -> Result<MigrationApplyResult, MigrationAuditError> {
+    let mut result = MigrationApplyResult {
+        applied: Vec::new(),
+        skipped: Vec::new(),
+        warnings: plan.warnings.clone(),
+        backups: Vec::new(),
+    };
+
+    for step in &plan.steps {
+        let Some(kind) = MigrationActionKind::from_str(&step.action) else {
+            result
+                .warnings
+                .push(format!("unknown action {}", step.action));
+            result.skipped.push(step.action.clone());
+            continue;
+        };
+        match kind {
+            MigrationActionKind::LayoutToSplit => {
+                if opts.dry_run {
+                    result.applied.push(format!("{} (dry-run)", kind.as_str()));
+                } else {
+                    let resolution = resolve_backlog(root)?;
+                    if resolution.layout.is_legacy() {
+                        let _ = migrate_backlog(&resolution, "split")?;
+                    }
+                    result.applied.push(kind.as_str().to_string());
+                }
+            }
+            MigrationActionKind::FocusToContext => {
+                if opts.dry_run {
+                    result.applied.push(format!("{} (dry-run)", kind.as_str()));
+                } else {
+                    let res = resolve_backlog(root)?;
+                    apply_focus_to_context(&res, opts, &mut result)?;
+                    result.applied.push(kind.as_str().to_string());
+                }
+            }
+            MigrationActionKind::TaskSectionNormalization => {
+                if opts.dry_run {
+                    result.applied.push(format!("{} (dry-run)", kind.as_str()));
+                } else {
+                    let res = resolve_backlog(root)?;
+                    let tasks = load_tasks(&res.state_root);
+                    let mut changed = Vec::new();
+                    for task in tasks {
+                        let quality = evaluate_task_quality(&task);
+                        if quality.missing_sections.is_empty() {
+                            continue;
+                        }
+                        if let Some(path) = task.file_path.as_ref() {
+                            let added = normalize_task_required_sections(path)?;
+                            if !added.is_empty() {
+                                changed.push(task.id.clone());
+                            }
+                        }
+                    }
+                    if changed.is_empty() {
+                        result.warnings.push(
+                            "task_section_normalization: no legacy task bodies to normalize"
+                                .to_string(),
+                        );
+                    }
+                    result.applied.push(kind.as_str().to_string());
+                }
+            }
+            MigrationActionKind::SessionHandoffEnrichment => {
+                if opts.dry_run {
+                    result.applied.push(format!("{} (dry-run)", kind.as_str()));
+                } else {
+                    enrich_sessions_handoff(&mut result)?;
+                    result.applied.push(kind.as_str().to_string());
+                }
+            }
+            MigrationActionKind::TruthBackfill => {
+                if opts.dry_run {
+                    result.applied.push(format!("{} (dry-run)", kind.as_str()));
+                } else {
+                    let res = resolve_backlog(root)?;
+                    let audit =
+                        truth_migration_audit(&res.state_root).map_err(std::io::Error::other)?;
+                    let plan = truth_migration_plan(&res.state_root, &audit)
+                        .map_err(std::io::Error::other)?;
+                    let migration = apply_truth_migration(&res.state_root, &plan, false)
+                        .map_err(std::io::Error::other)?;
+                    if migration.created_ids.is_empty() {
+                        result
+                            .warnings
+                            .push("truth_backfill: no legacy candidates to migrate".to_string());
+                    }
+                    result.applied.push(kind.as_str().to_string());
+                }
+            }
+            MigrationActionKind::ConfigCleanup => {
+                if opts.dry_run {
+                    result.applied.push(format!("{} (dry-run)", kind.as_str()));
+                } else {
+                    let res = resolve_backlog(root)?;
+                    if load_config(&res.repo_root)
+                        .and_then(|c| c.do_not_migrate)
+                        .unwrap_or(false)
+                    {
+                        let _ = update_do_not_migrate(&res.repo_root, false)?;
+                        result.applied.push(kind.as_str().to_string());
+                    } else {
+                        result.skipped.push(kind.as_str().to_string());
+                    }
+                }
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn apply_focus_to_context(
+    resolution: &BacklogResolution,
+    opts: &MigrationApplyOptions,
+    result: &mut MigrationApplyResult,
+) -> Result<(), MigrationAuditError> {
+    let focus_file = focus_path(&resolution.state_root);
+    let has_focus = focus_file.exists();
+    let existing_context = load_context(&resolution.state_root)?;
+    if existing_context.is_some() && !has_focus {
+        result
+            .skipped
+            .push(MigrationActionKind::FocusToContext.as_str().into());
+        return Ok(());
+    }
+
+    if has_focus && opts.backup {
+        let backup_dir = resolution
+            .state_root
+            .join("migrations")
+            .join(now_compact_timestamp());
+        fs::create_dir_all(&backup_dir)?;
+        let backup_path = backup_dir.join("focus.json.bak");
+        fs::copy(&focus_file, &backup_path)?;
+        result
+            .backups
+            .push(backup_path.to_string_lossy().to_string());
+    }
+
+    let context = if has_focus {
+        let legacy = load_focus(&resolution.state_root)?;
+        if let Some(state) = legacy {
+            context_from_legacy_focus(
+                state.project_id,
+                state.epic_id,
+                state.objective,
+                state.working_set,
+            )
+        } else {
+            context_from_legacy_focus(None, None, None, Vec::new())
+        }
+    } else {
+        context_from_legacy_focus(None, None, None, Vec::new())
+    };
+    let _ = save_context(&resolution.state_root, context)?;
+    if has_focus {
+        fs::remove_file(&focus_file)?;
+    }
+    Ok(())
+}
+
+fn enrich_sessions_handoff(result: &mut MigrationApplyResult) -> Result<(), MigrationAuditError> {
+    let home = resolve_workmesh_home().map_err(std::io::Error::other)?;
+    let sessions = load_sessions_latest(&home).map_err(std::io::Error::other)?;
+    let mut changed = 0usize;
+    for session in sessions {
+        if session.handoff.is_some() {
+            continue;
+        }
+        let mut updated: AgentSession = session.clone();
+        updated.handoff = Some(HandoffSummary::default());
+        updated.updated_at = crate::global_sessions::now_rfc3339();
+        append_session_saved(&home, updated)?;
+        changed += 1;
+    }
+    if changed > 0 {
+        let _ = rebuild_sessions_index(&home).map_err(std::io::Error::other)?;
+        if let Some(current_id) = crate::global_sessions::read_current_session_id(&home) {
+            set_current_session(&home, &current_id).map_err(std::io::Error::other)?;
+        }
+    } else {
+        result
+            .warnings
+            .push("session_handoff_enrichment: nothing to enrich".to_string());
+    }
+    Ok(())
+}
+
+fn now_compact_timestamp() -> String {
+    chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    fn write_task(tasks_dir: &Path) {
+        let _ = fs::create_dir_all(tasks_dir);
+        let _ = fs::write(
+            tasks_dir.join("task-001 - seed.md"),
+            "---\nid: task-001\ntitle: Seed\nstatus: To Do\npriority: P2\nphase: Phase1\n---\n",
+        );
+    }
+
+    #[test]
+    fn audit_detects_legacy_layout_and_focus() {
+        let temp = TempDir::new().expect("tempdir");
+        let backlog = temp.path().join("backlog").join("tasks");
+        write_task(&backlog);
+        let _ = fs::write(
+            temp.path().join("backlog").join("focus.json"),
+            r#"{"project_id":"demo","epic_id":"task-001","objective":"Ship","working_set":["task-001"]}"#,
+        );
+
+        let report = audit_deprecations(temp.path()).expect("audit");
+        let ids: Vec<String> = report.findings.into_iter().map(|f| f.id).collect();
+        assert!(ids.contains(&"legacy_layout".to_string()));
+        assert!(ids.contains(&"legacy_focus".to_string()));
+    }
+
+    #[test]
+    fn apply_focus_to_context_removes_focus_and_creates_context() {
+        let temp = TempDir::new().expect("tempdir");
+        let tasks = temp.path().join("workmesh").join("tasks");
+        write_task(&tasks);
+        let backlog = temp.path().join("workmesh");
+        let _ = fs::write(
+            backlog.join("focus.json"),
+            r#"{"project_id":"demo","epic_id":"task-001","objective":"Ship","working_set":["task-001"]}"#,
+        );
+        let report = audit_deprecations(temp.path()).expect("audit");
+        let plan = plan_migrations(
+            &report,
+            &MigrationPlanOptions {
+                include: vec!["focus_to_context".to_string()],
+                exclude: vec![],
+            },
+        );
+        let result = apply_migration_plan(
+            temp.path(),
+            &plan,
+            &MigrationApplyOptions {
+                dry_run: false,
+                backup: true,
+            },
+        )
+        .expect("apply");
+        assert!(result
+            .applied
+            .iter()
+            .any(|step| step.contains("focus_to_context")));
+        assert!(backlog.join("context.json").is_file());
+        assert!(!backlog.join("focus.json").exists());
+    }
+
+    #[test]
+    fn apply_task_section_normalization_adds_missing_sections() {
+        let temp = TempDir::new().expect("tempdir");
+        let tasks = temp.path().join("workmesh").join("tasks");
+        write_task(&tasks);
+        let report = audit_deprecations(temp.path()).expect("audit");
+        assert!(report
+            .findings
+            .iter()
+            .any(|f| f.id == "legacy_task_sections"));
+
+        let plan = plan_migrations(
+            &report,
+            &MigrationPlanOptions {
+                include: vec!["task_section_normalization".to_string()],
+                exclude: vec![],
+            },
+        );
+        let result = apply_migration_plan(
+            temp.path(),
+            &plan,
+            &MigrationApplyOptions {
+                dry_run: false,
+                backup: false,
+            },
+        )
+        .expect("apply");
+        assert!(result
+            .applied
+            .iter()
+            .any(|step| step == "task_section_normalization"));
+
+        let content =
+            std::fs::read_to_string(tasks.join("task-001 - seed.md")).expect("read normalized");
+        assert!(content.contains("Description:"));
+        assert!(content.contains("Acceptance Criteria:"));
+        assert!(content.contains("Definition of Done:"));
+    }
+}

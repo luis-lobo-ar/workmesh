@@ -1,0 +1,19 @@
+[package]
+name = "workmesh-mcp"
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+clap = { version = "4.5", features = ["derive"] }
+rust-mcp-sdk = { version = "0.8.3", default-features = true }
+tokio = { version = "1.39", features = ["macros", "rt-multi-thread"] }
+workmesh-mcp-server = { path = "../workmesh-mcp-server" }
+
+[dev-dependencies]
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+serde_json = "1.0"
+tempfile = "3.12"
+serial_test = "3.2"
+workmesh-core = { path = "../workmesh-core" }

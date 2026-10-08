@@ -1,0 +1,26 @@
+[package]
+name = "workmesh-core"
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_yaml = "0.9"
+serde_json = "1.0"
+thiserror = "1.0"
+regex = "1.10"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+ulid = "1.1"
+sha2 = "0.10"
+mesh-id = { path = "../../../../lib/mesh-id" }
+mesh-config = { path = "../../../../lib/mesh-config" }
+mesh-store = { path = "../../../../lib/mesh-store" }
+shell-words = "1.1"
+which = "6.0"
+
+[dev-dependencies]
+mesh-testkit = { path = "../../../../lib/mesh-testkit" }
+pretty_assertions = "1.4"
+tempfile = "3.12"

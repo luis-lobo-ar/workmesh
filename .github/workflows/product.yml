@@ -1,0 +1,79 @@
+name: workmesh tests and Linux snapshot release
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: workmesh-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test product and shared crates
+        run: cargo test --locked -p mesh-config -p mesh-id -p mesh-store -p mesh-testkit -p workmesh -p workmesh-core -p workmesh-mcp -p workmesh-mcp-server -p workmesh-render -p workmesh-tools
+      - name: Build release binaries
+        env:
+          RUSTFLAGS: ""
+        run: cargo build --locked --release -p workmesh -p workmesh-mcp
+      - name: Package binaries and notices
+        run: |
+          mkdir -p dist/workmesh-linux-x86_64/bin
+          for name in workmesh workmesh-mcp; do cp target/release/$name dist/workmesh-linux-x86_64/bin/; done
+          cp LICENSE LICENSES.txt mesh-export.json dist/workmesh-linux-x86_64/
+          notice_root="$PWD/dist/workmesh-linux-x86_64/third-party-notices"
+          mkdir -p "$notice_root"
+          registry_root="${CARGO_HOME:-$HOME/.cargo}/registry/src"
+          if [ -d "$registry_root" ]; then
+            (cd "$registry_root"; find . -type f \( -iname 'license*' -o -iname 'licence*' -o -iname 'copying*' -o -iname 'notice*' \) -print0 | tar --null -T - -cf "$notice_root/cargo-license-files.tar")
+          fi
+          if [ -d opt/boardmesh ]; then
+            cp opt/boardmesh/vendor/LICENSE-MIT dist/workmesh-linux-x86_64/WXDRAGON-LICENSE-MIT
+            cp opt/boardmesh/assets/icons/fontawesome-free/LICENSE.txt dist/workmesh-linux-x86_64/FONTAWESOME-LICENSE.txt
+            cp target/release/wxWidgets/docs/licence.txt "$notice_root/WXWINDOWS-LICENCE.txt"
+            cp target/release/wxWidgets/docs/lgpl.txt "$notice_root/WXWINDOWS-LGPL.txt"
+            (cd target/release/wxWidgets; find src 3rdparty -type f \( -iname 'license*' -o -iname 'licence*' -o -iname 'copying*' -o -iname 'notice*' \) -print0 | tar --null -T - -cf "$notice_root/wxwidgets-third-party-license-files.tar")
+          fi
+          tar -C dist -czf dist/workmesh-linux-x86_64.tar.gz workmesh-linux-x86_64
+          cd dist
+          sha256sum workmesh-linux-x86_64.tar.gz > workmesh-linux-x86_64.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: workmesh-linux-x86_64
+          path: dist/*.gz*
+          if-no-files-found: error
+  release:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: workmesh-linux-x86_64
+          path: dist
+      - name: Publish immutable snapshot
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          tag="snapshot-$GITHUB_SHA"
+          if assets=$(gh release view "$tag" --json assets --jq '.assets[].name' 2>/dev/null); then
+            for name in workmesh-linux-x86_64.tar.gz workmesh-linux-x86_64.tar.gz.sha256; do
+              if ! printf '%s\n' "$assets" | grep -Fxq "$name"; then
+                echo "Incomplete existing release: missing $name. Repair using the original CI artifact; existing assets are never replaced." >&2
+                exit 1
+              fi
+            done
+            exit 0
+          fi
+          gh release create "$tag" dist/*.gz* --target "$GITHUB_SHA" --prerelease --title "workmesh Linux snapshot" --notes-file RELEASE-NOTES.md

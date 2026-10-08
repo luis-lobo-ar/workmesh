@@ -1,0 +1,440 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Getting Started</title>
+  <style>
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      background-color: #1a1a1a;
+      border: none;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+    /* CSS for syntax highlighting */
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
+    }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+        color: #aaaaaa;
+      }
+    pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+    div.sourceCode
+      {   }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+    code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+    code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+    code span.at { color: #7d9029; } /* Attribute */
+    code span.bn { color: #40a070; } /* BaseN */
+    code span.bu { color: #008000; } /* BuiltIn */
+    code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+    code span.ch { color: #4070a0; } /* Char */
+    code span.cn { color: #880000; } /* Constant */
+    code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+    code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+    code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+    code span.dt { color: #902000; } /* DataType */
+    code span.dv { color: #40a070; } /* DecVal */
+    code span.er { color: #ff0000; font-weight: bold; } /* Error */
+    code span.ex { } /* Extension */
+    code span.fl { color: #40a070; } /* Float */
+    code span.fu { color: #06287e; } /* Function */
+    code span.im { color: #008000; font-weight: bold; } /* Import */
+    code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+    code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+    code span.op { color: #666666; } /* Operator */
+    code span.ot { color: #007020; } /* Other */
+    code span.pp { color: #bc7a00; } /* Preprocessor */
+    code span.sc { color: #4070a0; } /* SpecialChar */
+    code span.ss { color: #bb6688; } /* SpecialString */
+    code span.st { color: #4070a0; } /* String */
+    code span.va { color: #19177c; } /* Variable */
+    code span.vs { color: #4070a0; } /* VerbatimString */
+    code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+  </style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Getting Started</h1>
+</header>
+<h1 id="getting-started">Getting Started</h1>
+<p>This guide is Codex-first. It assumes your normal workflow is
+chat-driven, not command-driven.</p>
+<h2 id="one-time-setup">One-Time Setup</h2>
+<ol type="1">
+<li>Install <code>workmesh</code> and <code>workmesh-mcp</code>.</li>
+<li>Configure Codex MCP for <code>workmesh-mcp</code> if you want MCP
+mode.</li>
+<li>Install WorkMesh skills (router + CLI + MCP profiles).</li>
+<li>For complete run-mode and agent setup (CLI, MCP stdio), see:
+<ul>
+<li><a
+href="setup/run-modes-and-agent-mcp.html"><code>docs/setup/run-modes-and-agent-mcp.md</code></a></li>
+</ul></li>
+</ol>
+<p>Skill layout:</p>
+<ul>
+<li>canonical source skills live in <code>skills/</code></li>
+<li>project-local installs use <code>.agents/skills/</code> for Codex
+and Cursor, <code>.claude/skills/</code> for Claude</li>
+<li>user installs use <code>~/.codex/skills/</code>,
+<code>~/.cursor/skills/</code>, and <code>~/.claude/skills/</code></li>
+</ul>
+<p>After this, your day-to-day entry flow is one prompt.</p>
+<h2 id="daily-entry-flow-any-repo-state">Daily Entry Flow (Any Repo
+State)</h2>
+<p>You can start from any directory state:</p>
+<ul>
+<li>brand new repo with no WorkMesh</li>
+<li>modern WorkMesh repo</li>
+<li>old legacy WorkMesh/backlog layout</li>
+<li>long-lived branch clone workflow</li>
+</ul>
+<p>Run:</p>
+<ol type="1">
+<li><code>cd &lt;repo-or-clone-dir&gt;</code></li>
+<li><code>codex</code> or <code>codex resume</code></li>
+<li>Prompt:</li>
+</ol>
+<p><code>Bootstrap WorkMesh in this repo. Use MCP if available, otherwise CLI. Detect repo state and set me up to start feature work.</code></p>
+<h2 id="bootstrap-contract-what-codex-should-do">Bootstrap Contract
+(What Codex Should Do)</h2>
+<p>When given that prompt, Codex should do this automatically:</p>
+<ol type="1">
+<li>Detect tool mode:</li>
+</ol>
+<ul>
+<li>if WorkMesh MCP is available, use MCP tools.</li>
+<li>otherwise use WorkMesh CLI commands.</li>
+</ul>
+<ol start="2" type="1">
+<li>Detect repository state:</li>
+</ol>
+<ul>
+<li>no WorkMesh data</li>
+<li>modern WorkMesh layout</li>
+<li>legacy layout (<code>backlog/</code>, <code>focus.json</code>,
+deprecated structures)</li>
+<li>clone/branch stream not yet migrated to worktree model</li>
+</ul>
+<ol start="3" type="1">
+<li>Apply the correct path:</li>
+</ol>
+<ul>
+<li>New repo: initialize WorkMesh, seed project/task context.</li>
+<li>Modern repo: validate health and show current scope + next
+work.</li>
+<li>Legacy repo: migrate to modern layout, then continue.</li>
+<li>Clone-based stream: continue work now and recommend worktree
+consolidation path.</li>
+</ul>
+<ol start="4" type="1">
+<li>Confirm bootstrap result in chat:</li>
+</ol>
+<ul>
+<li>detected state</li>
+<li>actions taken</li>
+<li>current context</li>
+<li>next recommended task(s)</li>
+</ul>
+<h2 id="start-feature-work-single-prompt">Start Feature Work (Single
+Prompt)</h2>
+<p>After bootstrap, use one explicit feature prompt:</p>
+<p><code>Use WorkMesh for this feature end to end. Create/update PRD, create and maintain tasks with acceptance criteria and definition of done, keep context current, and track stable decisions in Truth Ledger.</code></p>
+<p>Quality expectations:</p>
+<ul>
+<li>By default, every actionable task should have meaningful
+<code>Description</code>, <code>Acceptance Criteria</code>, and
+<code>Definition of Done</code>.</li>
+<li>By default, <code>Definition of Done</code> should include
+outcome-based completion criteria, not only hygiene checks.</li>
+<li>Repos can override those required fields with
+<code>task_require_description</code>,
+<code>task_require_acceptance_criteria</code>,
+<code>task_require_definition_of_done</code>, and
+<code>task_require_outcome_based_definition_of_done</code>.</li>
+<li>WorkMesh gates actionable and <code>Done</code> transitions when the
+configured quality requirements are not met.</li>
+</ul>
+<p>From here, stay in normal chat. You should not need to switch into
+command memorization mode.</p>
+<h2 id="reboot--resume-flow">Reboot / Resume Flow</h2>
+<p>When you come back later:</p>
+<ol type="1">
+<li><code>cd &lt;repo-or-worktree&gt;</code></li>
+<li><code>codex resume</code></li>
+<li>Prompt:</li>
+</ol>
+<p><code>Rehydrate this session with WorkMesh: restore context, accepted truths, and next actionable tasks.</code></p>
+<h2 id="restore-multiple-workstreams-after-reboot">Restore Multiple
+Workstreams (After Reboot)</h2>
+<p>If you run multiple parallel workstreams (often one git worktree per
+stream), you can restore them deterministically from any checkout of the
+repo:</p>
+<ol type="1">
+<li><code>cd &lt;repo-or-any-worktree&gt;</code></li>
+<li>Run:</li>
+</ol>
+<div class="sourceCode" id="cb1"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">workmesh</span> <span class="at">--root</span> . workstream restore <span class="at">--json</span></span></code></pre></div>
+<p>This returns a per-workstream restore plan. Each entry includes:</p>
+<ul>
+<li><code>worktree_path</code>: where to open a terminal for that
+stream</li>
+<li><code>session_id</code>: the last-known session for that stream
+(best effort)</li>
+<li><code>context</code>: objective/scope (from
+<code>context.json</code>, legacy <code>focus.json</code>, or the
+workstream snapshot)</li>
+<li><code>next_task</code>: the next recommended task under that
+stream's context</li>
+<li><code>resume_script</code>: the exact commands to run in that
+worktree to resume</li>
+</ul>
+<p>Typical usage:</p>
+<ol type="1">
+<li>Open a terminal in <code>worktree_path</code>.</li>
+<li>Run the <code>resume_script</code> commands (they include
+<code>session resume</code>, <code>context show</code>, and
+<code>next</code>).</li>
+<li>Continue feature work in Codex from that worktree.</li>
+</ol>
+<p>Tip: to get resume commands for a single workstream:</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="ex">workmesh</span> <span class="at">--root</span> . workstream show <span class="op">&lt;</span>id-or-key<span class="op">&gt;</span> --restore <span class="at">--json</span></span></code></pre></div>
+<h2
+id="clone-to-worktree-transition-when-you-are-ready">Clone-to-Worktree
+Transition (When You Are Ready)</h2>
+<p>If you currently keep multiple full clones for parallel streams,
+migrate progressively:</p>
+<ol type="1">
+<li>Pick one canonical repo clone.</li>
+<li>Keep current stream moving.</li>
+<li>For each old clone, adopt it into a git worktree (backup + worktree
+add):</li>
+</ol>
+<div class="sourceCode" id="cb3"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="ex">workmesh</span> <span class="at">--root</span> . worktree adopt-clone <span class="at">--from</span> <span class="op">&lt;</span>path-to-clone<span class="op">&gt;</span> --json</span>
+<span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="ex">workmesh</span> <span class="at">--root</span> . worktree adopt-clone <span class="at">--from</span> <span class="op">&lt;</span>path-to-clone<span class="op">&gt;</span> --apply <span class="at">--json</span></span></code></pre></div>
+<ol start="4" type="1">
+<li>Bind a workstream to the created worktree with
+<code>workstream create --existing</code> (the adoption plan includes
+the exact command).</li>
+<li>Attach/save session metadata to each worktree
+(<code>session save</code>, <code>worktree attach</code>).</li>
+<li>Retire old clone directories after validation.</li>
+</ol>
+<p>This migration is operationally helpful, but it should not block you
+from feature work.</p>
+<h2 id="manual-commands-appendix">Manual Commands (Appendix)</h2>
+<p>Only use this if you explicitly want direct CLI execution.</p>
+<ul>
+<li>Bootstrap:
+<code>workmesh --root . bootstrap --project-id &lt;project-id&gt; --feature "&lt;feature-name&gt;" --json</code></li>
+<li>Context:
+<code>workmesh --root . context set --project &lt;project-id&gt; --epic &lt;epic-id&gt; --objective "&lt;objective&gt;"</code></li>
+<li>Next task: <code>workmesh --root . next --json</code></li>
+<li>Session resume:
+<code>workmesh --root . session resume --json</code></li>
+<li>Workstream restore (all active streams):
+<code>workmesh --root . workstream restore --json</code></li>
+<li>Worktrees: <code>workmesh --root . worktree list --json</code></li>
+<li>Adopt clone into worktree:
+<code>workmesh --root . worktree adopt-clone --from &lt;path-to-clone&gt; --apply --json</code></li>
+<li>Archive (default terminal statuses):
+<code>workmesh --root . archive --before 30d --json</code></li>
+<li>Archive (explicit override):
+<code>workmesh --root . archive --status "To Do" --before 2026-12-31 --json</code></li>
+<li>Archive (specific tasks):
+<code>workmesh --root . archive task-123 task-456 --json</code></li>
+<li>Migrate legacy:
+<code>workmesh --root . migrate audit|plan|apply --apply</code></li>
+</ul>
+<h2 id="related-docs">Related Docs</h2>
+<ul>
+<li>Command reference: <a
+href="reference/commands.html"><code>docs/reference/commands.md</code></a></li>
+<li>Documentation index: <a
+href="README.md"><code>docs/README.md</code></a></li>
+</ul>
+</body>
+</html>

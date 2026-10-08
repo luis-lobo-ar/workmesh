@@ -1,0 +1,20 @@
+[package]
+name = "workmesh-mcp-server"
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+rust-mcp-sdk = { version = "0.8.3", default-features = true }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+shell-words = "1.1"
+workmesh-core = { path = "../workmesh-core" }
+workmesh-tools = { path = "../workmesh-tools" }
+workmesh-render = { path = "../workmesh-render" }
+
+[dev-dependencies]
+tempfile = "3.12"

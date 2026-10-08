@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = [
+  "lib/mesh-config",
+  "lib/mesh-id",
+  "lib/mesh-store",
+  "lib/mesh-testkit",
+  "opt/workmesh/crates/workmesh-cli",
+  "opt/workmesh/crates/workmesh-core",
+  "opt/workmesh/crates/workmesh-mcp",
+  "opt/workmesh/crates/workmesh-mcp-server",
+  "opt/workmesh/crates/workmesh-render",
+  "opt/workmesh/crates/workmesh-tools"
+]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+fs2 = "0.4"
+toml = "0.8"
+ulid = "1.1"
+

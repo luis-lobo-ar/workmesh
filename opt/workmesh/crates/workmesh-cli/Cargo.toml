@@ -1,0 +1,19 @@
+[package]
+name = "workmesh"
+version = "0.4.0"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+serde_json = "1.0"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+workmesh-core = { path = "../workmesh-core" }
+workmesh-tools = { path = "../workmesh-tools" }
+workmesh-render = { path = "../workmesh-render" }
+shell-words = "1.1"
+which = "6.0"
+
+[dev-dependencies]
+tempfile = "3.12"

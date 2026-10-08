@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" lang="" xml:lang="">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Commands</title>
+  <style>
+    html {
+      color: #1a1a1a;
+      background-color: #fdfdfd;
+    }
+    body {
+      margin: 0 auto;
+      max-width: 36em;
+      padding-left: 50px;
+      padding-right: 50px;
+      padding-top: 50px;
+      padding-bottom: 50px;
+      hyphens: auto;
+      overflow-wrap: break-word;
+      text-rendering: optimizeLegibility;
+      font-kerning: normal;
+    }
+    @media (max-width: 600px) {
+      body {
+        font-size: 0.9em;
+        padding: 12px;
+      }
+      h1 {
+        font-size: 1.8em;
+      }
+    }
+    @media print {
+      html {
+        background-color: white;
+      }
+      body {
+        background-color: transparent;
+        color: black;
+        font-size: 12pt;
+      }
+      p, h2, h3 {
+        orphans: 3;
+        widows: 3;
+      }
+      h2, h3, h4 {
+        page-break-after: avoid;
+      }
+    }
+    p {
+      margin: 1em 0;
+    }
+    a {
+      color: #1a1a1a;
+    }
+    a:visited {
+      color: #1a1a1a;
+    }
+    img {
+      max-width: 100%;
+    }
+    svg {
+      height: auto;
+      max-width: 100%;
+    }
+    h1, h2, h3, h4, h5, h6 {
+      margin-top: 1.4em;
+    }
+    h5, h6 {
+      font-size: 1em;
+      font-style: italic;
+    }
+    h6 {
+      font-weight: normal;
+    }
+    ol, ul {
+      padding-left: 1.7em;
+      margin-top: 1em;
+    }
+    li > ol, li > ul {
+      margin-top: 0;
+    }
+    blockquote {
+      margin: 1em 0 1em 1.7em;
+      padding-left: 1em;
+      border-left: 2px solid #e6e6e6;
+      color: #606060;
+    }
+    code {
+      font-family: Menlo, Monaco, Consolas, 'Lucida Console', monospace;
+      font-size: 85%;
+      margin: 0;
+      hyphens: manual;
+    }
+    pre {
+      margin: 1em 0;
+      overflow: auto;
+    }
+    pre code {
+      padding: 0;
+      overflow: visible;
+      overflow-wrap: normal;
+    }
+    .sourceCode {
+     background-color: transparent;
+     overflow: visible;
+    }
+    hr {
+      background-color: #1a1a1a;
+      border: none;
+      height: 1px;
+      margin: 1em 0;
+    }
+    table {
+      margin: 1em 0;
+      border-collapse: collapse;
+      width: 100%;
+      overflow-x: auto;
+      display: block;
+      font-variant-numeric: lining-nums tabular-nums;
+    }
+    table caption {
+      margin-bottom: 0.75em;
+    }
+    tbody {
+      margin-top: 0.5em;
+      border-top: 1px solid #1a1a1a;
+      border-bottom: 1px solid #1a1a1a;
+    }
+    th {
+      border-top: 1px solid #1a1a1a;
+      padding: 0.25em 0.5em 0.25em 0.5em;
+    }
+    td {
+      padding: 0.125em 0.5em 0.25em 0.5em;
+    }
+    header {
+      margin-bottom: 4em;
+      text-align: center;
+    }
+    #TOC li {
+      list-style: none;
+    }
+    #TOC ul {
+      padding-left: 1.3em;
+    }
+    #TOC > ul {
+      padding-left: 0;
+    }
+    #TOC a:not(:hover) {
+      text-decoration: none;
+    }
+    code{white-space: pre-wrap;}
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+  </style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Commands</h1>
+</header>
+<h1 id="command-reference">Command Reference</h1>
+<p>This file is command-surface only. For workflow guidance, use <a
+href="../getting-started.html"><code>docs/getting-started.md</code></a>.</p>
+<p>Run/install/agent setup guidance:</p>
+<ul>
+<li><a
+href="../setup/run-modes-and-agent-mcp.html"><code>docs/setup/run-modes-and-agent-mcp.md</code></a></li>
+</ul>
+<h2 id="global-cli-flags">Global CLI flags</h2>
+<p>All subcommands support:</p>
+<ul>
+<li><code>--root &lt;path&gt;</code> (required)</li>
+<li><code>--auto-checkpoint</code></li>
+<li><code>--auto-session-save</code></li>
+<li><code>--no-auto-session-save</code></li>
+</ul>
+<p>CLI parity notes:</p>
+<ul>
+<li>The CLI accepts MCP-style aliases in either underscore or hyphen
+form.</li>
+<li>Examples:
+<ul>
+<li><code>help</code> -&gt; <code>--help</code></li>
+<li><code>list_tasks</code> -&gt; <code>list</code></li>
+<li><code>show_task</code> -&gt; <code>show</code></li>
+<li><code>config_show</code> -&gt; <code>config show</code></li>
+<li><code>truth_list</code> -&gt; <code>truth list</code></li>
+<li><code>workstream_list</code> -&gt; <code>workstream list</code></li>
+<li><code>worktree_list</code> -&gt; <code>worktree list</code></li>
+<li><code>render_table</code> -&gt; <code>render table</code></li>
+</ul></li>
+</ul>
+<h2 id="defaults-and-config">Defaults and config</h2>
+<p>Global config:</p>
+<ul>
+<li><code>~/.workmesh/config.toml</code> (or
+<code>$WORKMESH_HOME/config.toml</code>)</li>
+</ul>
+<p>Project config:</p>
+<ul>
+<li><code>.workmesh.toml</code> (preferred)</li>
+</ul>
+<p>Keys:</p>
+<ul>
+<li><code>tasks_root = "&lt;path&gt;"</code> (repo-relative or absolute;
+default for new repos: <code>tasks/</code>). Active task and epic
+Markdown files are discovered recursively under this root.</li>
+<li><code>state_root = "&lt;path&gt;"</code> (repo-relative or absolute;
+default for new repos: <code>.workmesh/</code>)</li>
+<li><code>task_require_description = true|false</code> (default:
+<code>true</code>)</li>
+<li><code>task_require_acceptance_criteria = true|false</code> (default:
+<code>true</code>)</li>
+<li><code>task_require_definition_of_done = true|false</code> (default:
+<code>true</code>)</li>
+<li><code>task_require_outcome_based_definition_of_done = true|false</code>
+(default: <code>true</code>)</li>
+<li><code>worktrees_default = true|false</code></li>
+<li><code>worktrees_dir = "&lt;path&gt;"</code> (absolute or
+repo-relative; used for auto-provisioned worktrees; default:
+<code>&lt;repo_parent&gt;/&lt;repo_name&gt;.worktrees/</code>)</li>
+<li><code>auto_session_default = true|false</code></li>
+<li><code>root_dir = "&lt;path&gt;"</code> (deprecated single-root
+compatibility alias)</li>
+</ul>
+<p>Precedence:</p>
+<ol type="1">
+<li>CLI flags</li>
+<li>Environment variables</li>
+<li>Project config</li>
+<li>Global config</li>
+<li>Built-in defaults</li>
+</ol>
+<p>Environment overrides:</p>
+<ul>
+<li><code>WORKMESH_AUTO_CHECKPOINT=1|0</code></li>
+<li><code>WORKMESH_AUTO_SESSION=1|0</code></li>
+</ul>
+<h2 id="config">Config</h2>
+<p>CLI:</p>
+<ul>
+<li><code>config show [--json]</code></li>
+<li><code>config set --scope project|global --key tasks_root|state_root|task_require_description|task_require_acceptance_criteria|task_require_definition_of_done|task_require_outcome_based_definition_of_done|worktrees_default|worktrees_dir|auto_session_default|root_dir|do_not_migrate --value &lt;value&gt; [--json]</code></li>
+<li><code>config unset --scope project|global --key tasks_root|state_root|task_require_description|task_require_acceptance_criteria|task_require_definition_of_done|task_require_outcome_based_definition_of_done|worktrees_default|worktrees_dir|auto_session_default|root_dir|do_not_migrate [--json]</code></li>
+</ul>
+<p>MCP:</p>
+<ul>
+<li><code>config_show</code></li>
+<li><code>config_set</code></li>
+<li><code>config_unset</code></li>
+</ul>
+<h2 id="bootstrap-and-diagnostics">Bootstrap and diagnostics</h2>
+<p>CLI:</p>
+<ul>
+<li><code>readme [--json]</code></li>
+<li><code>tool-info &lt;tool-name&gt; [--json]</code></li>
+<li><code>skill-content [--name &lt;skill&gt;] [--json]</code></li>
+<li><code>project-management-skill [--name &lt;skill&gt;] [--json]</code></li>
+<li><code>bootstrap [--project-id &lt;id&gt;] [--feature "..."] [--objective "..."] [--tasks-root &lt;path&gt;] [--state-root &lt;path&gt;] [--json]</code></li>
+<li><code>quickstart &lt;project-id&gt; [--name "..."] [--feature "..."] [--tasks-root &lt;path&gt;] [--state-root &lt;path&gt;] [--agents-snippet]</code></li>
+<li><code>project-init &lt;project-id&gt; [--name "..."]</code></li>
+<li><code>doctor [--fix-storage] [--json]</code></li>
+<li><code>validate [--json]</code></li>
+</ul>
+<p>MCP:</p>
+<ul>
+<li><code>readme</code></li>
+<li><code>tool_info</code></li>
+<li><code>skill_content</code></li>
+<li><code>project_management_skill</code></li>
+<li><code>bootstrap</code></li>
+<li><code>quickstart</code></li>
+<li><code>project_init</code></li>
+<li><code>doctor</code></li>
+<li><code>validate</code></li>
+</ul>
+<p><code>tool-info</code> note:</p>
+<ul>
+<li>CLI <code>tool-info</code> mirrors the shared metadata/examples from
+<code>workmesh-tools</code>.</li>
+<li>MCP <code>tool_info</code> remains the canonical source for the full
+MCP input schema.</li>
+</ul>
+<p>Doctor storage fix behavior:</p>
+<ul>
+<li><code>--fix-storage</code> (CLI) / <code>fix_storage=true</code>
+(MCP) performs safe remediation only:
+<ul>
+<li>trim trailing malformed JSONL lines for sessions/truth event
+streams</li>
+<li>rebuild truth projection when applicable</li>
+<li>rebuild sessions index when applicable</li>
+</ul></li>
+<li>Non-trailing malformed JSONL is reported but not auto-trimmed.</li>
+<li>Doctor output includes storage integrity checks:
+<ul>
+<li>lock-path accessibility</li>
+<li>malformed JSONL counts</li>
+<li>truth projection/event divergence</li>
+<li>versioned snapshot state</li>
+</ul></li>
+</ul>
+<p>Conflict semantics:</p>
+<ul>
+<li>Versioned snapshot writes use compare-and-swap behavior.</li>
+<li>Stale writes surface explicit conflict errors; they are not silently
+overwritten.</li>
+<li>Legacy unversioned snapshots are treated as version <code>0</code>
+and migrated on first safe write.</li>
+</ul>
+<h2 id="mutation-response-policy">Mutation response policy</h2>
+<ul>
+<li>MCP mutation tools return minimal acknowledgements by default to
+save tokens.</li>
+<li>Pass <code>verbose=true</code> when you need richer post-write state
+in the same response.</li>
+<li>Prefer dedicated read tools (<code>show_task</code>,
+<code>truth_show</code>, <code>session_show</code>,
+<code>workstream_show</code>, <code>context_show</code>) when you need
+the full current object.</li>
+<li>Typical defaults:
+<ul>
+<li>single-record mutation: <code>{"ok": true, "id": "..."}</code></li>
+<li>field/status mutation:
+<code>{"ok": true, "id": "...", "status": "Done"}</code></li>
+<li>bulk mutation:
+<code>{"ok": false, "updated_count": 3, "failed_count": 1, "failed_ids": ["task-009"]}</code></li>
+</ul></li>
+</ul>
+<h2 id="renderer-tools">Renderer tools</h2>
+<p>CLI:</p>
+<ul>
+<li><code>render table|kv|stats|list|progress|tree|diff|logs|alerts|chart-bar|sparkline|timeline</code></li>
+<li>input: one of <code>--data &lt;value&gt;</code>,
+<code>--data-file &lt;path&gt;</code>, or <code>--stdin</code></li>
+<li>optional: <code>--format &lt;value&gt;</code></li>
+<li>optional: one of <code>--configuration &lt;json&gt;</code> or
+<code>--config-file &lt;path&gt;</code></li>
+</ul>
+<h2 id="task-selection-and-read-views">Task selection and read
+views</h2>
+<p>CLI:</p>
+<ul>
+<li><code>list [--status "To Do"] [--kind bug] [--search "..."] [--sort id] [--all] [--json]</code></li>
+<li><code>show &lt;task-id&gt; [--full] [--json]</code></li>
+<li><code>next [--json]</code></li>
+<li><code>next-tasks [--limit N] [--json]</code></li>
+<li><code>ready [--limit N] [--json]</code></li>
+<li><code>board [--by status|phase|priority] [--focus] [--all] [--json]</code></li>
+<li><code>blockers [--epic-id task-123] [--all] [--json]</code></li>
+<li><code>stats [--json]</code></li>
+</ul>
+<p>MCP:</p>
+<ul>
+<li><code>list_tasks</code></li>
+<li><code>show_task</code></li>
+<li><code>next_task</code>, <code>next_tasks</code></li>
+<li><code>ready_tasks</code></li>
+<li><code>board</code></li>
+<li><code>blockers</code></li>
+<li><code>stats</code></li>
+</ul>
+<h2 id="task-mutations">Task mutations</h2>
+<p>CLI:</p>
+<ul>
+<li><code>add --title "..." --description "..." --acceptance-criteria "..." --definition-of-done "..." [--id task-...] [--status "..."] [--priority P2] [--phase Phase1] [--labels "..."] [--dependencies "..."] [--assignee "..."] [--draft] [--json]</code></li>
+<li><code>add-discovered --from &lt;task-id&gt; --title "..." --description "..." --acceptance-criteria "..." --definition-of-done "..." ... [--draft]</code></li>
+<li><code>set-status &lt;task-id&gt; "In Progress"|"To Do"|Done</code></li>
+<li><code>set-field &lt;task-id&gt; &lt;field&gt; &lt;value&gt;</code></li>
+<li><code>label-add &lt;task-id&gt; &lt;label&gt;</code> /
+<code>label-remove &lt;task-id&gt; &lt;label&gt;</code></li>
+<li><code>dep-add &lt;task-id&gt; &lt;dependency-id&gt;</code> /
+<code>dep-remove &lt;task-id&gt; &lt;dependency-id&gt;</code></li>
+<li><code>note &lt;task-id&gt; "..." [--section notes|impl]</code></li>
+<li><code>set-body &lt;task-id&gt; [--text "..."] [--file path]</code></li>
+<li><code>set-section &lt;task-id&gt; &lt;section&gt; [--text "..."] [--file path]</code></li>
+<li><code>claim &lt;task-id&gt; &lt;owner&gt; [--minutes 60]</code></li>
+<li><code>release &lt;task-id&gt;</code></li>
+</ul>
+<p>MCP:</p>
+<ul>
+<li><code>add_task</code></li>
+<li><code>add_discovered</code></li>
+<li><code>set_status</code></li>
+<li><code>set_field</code></li>
+<li><code>add_label</code>, <code>remove_label</code></li>
+<li><code>add_dependency</code>, <code>remove_dependency</code></li>
+<li><code>add_note</code></li>
+<li><code>set_body</code>, <code>set_section</code></li>
+<li><code>claim_task</code>, <code>release_task</code></li>
+</ul>
+<p>MCP mutation response contract:</p>
+<ul>
+<li>default: minimal acknowledgement</li>
+<li>opt-in: <code>verbose=true</code> for richer post-write state</li>
+<li>examples:
+<ul>
+<li><code>set_status</code> default:
+<code>{"ok": true, "id": "task-001", "status": "Done"}</code></li>
+<li><code>set_status</code> verbose: includes the refreshed
+<code>task</code></li>
+<li><code>add_task</code> default:
+<code>{"ok": true, "id": "task-123", "path": "..."}</code></li>
+<li><code>add_task</code> verbose: includes <code>task</code>,
+<code>hints</code>, and <code>next_steps</code></li>
+</ul></li>
+</ul>
+<p>Task quality guardrails:</p>
+<ul>
+<li>Default required task-body sections: <code>Description</code>,
+<code>Acceptance Criteria</code>, <code>Definition of Done</code>.</li>
+<li>Default <code>Definition of Done</code> policy: include
+outcome-based criteria, not only hygiene bullets.</li>
+<li>Repos can override the required fields with:
+<ul>
+<li><code>task_require_description</code></li>
+<li><code>task_require_acceptance_criteria</code></li>
+<li><code>task_require_definition_of_done</code></li>
+<li><code>task_require_outcome_based_definition_of_done</code></li>
+</ul></li>
+<li>Actionable statuses are <code>To Do</code> and
+<code>In Progress</code>.</li>
+<li>Incomplete tasks must be created explicitly as <code>Draft</code> or
+<code>Needs Refinement</code> via the draft flag.</li>
+<li><code>config show</code> / <code>config_show</code> reports the
+effective task-quality policy and where each value came from.</li>
+<li><code>add</code> / <code>add_task</code> and discovered-task
+creation require the repo’s configured task-body sections unless draft
+mode is requested.</li>
+<li><code>next_task</code>, <code>next_tasks</code>, and
+<code>ready_tasks</code> only return actionable tasks that already meet
+the configured task-quality gate.</li>
+<li>Task directories may be organized by customer, project,
+application/service, initiative, or feature. Paths are for human
+navigation; task identity and relationships come from front matter.</li>
+<li><code>Done</code> transitions are gated across all status mutation
+paths:
+<ul>
+<li><code>set-status ... Done</code></li>
+<li><code>set-field ... status Done</code></li>
+<li><code>bulk set-status --status Done</code></li>
+<li><code>bulk set-field --field status --value Done</code></li>
+</ul></li>
+<li>Actionable status transitions are also gated across the same
+mutation paths:
+<ul>
+<li><code>set-status ... "To Do"|"In Progress"</code></li>
+<li><code>set-field ... status "To Do"|"In Progress"</code></li>
+<li><code>bulk set-status --status "To Do"|"In Progress"</code></li>
+<li><code>bulk set-field --field status --value "To Do"|"In Progress"</code></li>
+</ul></li>
+<li><code>validate</code> behavior:
+<ul>
+<li><code>Draft</code> / <code>Needs Refinement</code> tasks with
+missing/incomplete sections produce warnings</li>
+<li>actionable and <code>Done</code> tasks with missing/incomplete
+sections (or hygiene-only DoD) produce errors</li>
+</ul></li>
+</ul>
+<h2 id="bulk-operations">Bulk operations</h2>
+<p>CLI:</p>
+<ul>
+<li><code>bulk set-status --tasks task-001,task-002 --status "In Progress" [--json]</code></li>
+<li><code>bulk set-field --tasks ... --field priority --value P1 [--json]</code></li>
+<li><code>bulk label-add --tasks ... --label docs [--json]</code></li>
+<li><code>bulk label-remove --tasks ... --label docs [--json]</code></li>
+<li><code>bulk dep-add --tasks ... --dependency task-123 [--json]</code></li>
+<li><code>bulk dep-remove --tasks ... --dependency task-123 [--json]</code></li>
+<li><code>bulk note --tasks ... --note "..." [--section notes|impl] [--json]</code></li>
+</ul>
+<p>MCP:</p>
+<ul>
+<li><code>bulk_set_status</code></li>
+<li><code>bulk_set_field</code></li>
+<li><code>bulk_add_label</code>, <code>bulk_remove_label</code></li>
+<li><code>bulk_add_dependency</code>,
+<code>bulk_remove_dependency</code></li>
+<li><code>bulk_add_note</code></li>
+</ul>
+<p>MCP mutation response contract:</p>
+<ul>
+<li>default: summary only (<code>ok</code>, <code>updated_count</code>,
+<code>failed_count</code>, <code>failed_ids</code>)</li>
+<li>opt-in: <code>verbose=true</code> for full updated/missing
+lists</li>
+</ul>
+<h2 id="context">Context</h2>
+<p>CLI:</p>
+<ul>
+<li><code>context show [--json]</code></li>
+<li><code>context set --project &lt;pid&gt; [--epic task-123] [--objective "..."] [--tasks task-001,task-002]</code></li>
+<li><code>context clear</code></li>
+</ul>
+<p>MCP:</p>
+<ul>
+<li><code>context_show</code></li>
+<li><code>context_set</code></li>
+<li><code>context_clear</code></li>
+</ul>
+<p>MCP mutation response contract:</p>
+<ul>
+<li><code>context_set</code> / <code>context_clear</code> default to
+compact acknowledgements</li>
+<li>pass <code>verbose=true</code> to include richer context
+payloads</li>
+</ul>
+<h2 id="truth-ledger">Truth Ledger</h2>
+<p>CLI:</p>
+<ul>
+<li><code>truth propose --title "..." --statement "..." [--project &lt;pid&gt;] [--epic task-123] [--feature &lt;name&gt;] [--workstream-id &lt;id&gt;] [--current] [--session-id &lt;id&gt;] [--worktree-id &lt;id&gt;] [--worktree-path &lt;path&gt;] [--constraints "a,b"] [--tags "x,y"] [--json]</code></li>
+<li><code>truth accept &lt;truth-id&gt; [--note "..."] [--json]</code></li>
+<li><code>truth reject &lt;truth-id&gt; [--note "..."] [--json]</code></li>
+<li><code>truth supersede &lt;truth-id&gt; --by &lt;accepted-truth-id&gt; [--reason "..."] [--json]</code></li>
+<li><code>truth show &lt;truth-id&gt; [--json]</code></li>
+<li><code>truth list [--state proposed|accepted|rejected|superseded] [--project &lt;pid&gt;] [--epic task-123] [--feature &lt;name&gt;] [--workstream-id &lt;id&gt;] [--session-id &lt;id&gt;] [--worktree-id &lt;id&gt;] [--worktree-path &lt;path&gt;] [--tag &lt;tag&gt;] [--limit N] [--json]</code></li>
+<li><code>truth validate [--json]</code></li>
+<li><code>truth migrate audit|plan|apply [--apply] [--json]</code></li>
+</ul>
+<p>MCP:</p>
+<ul>
+<li><code>truth_propose</code></li>
+<li><code>truth_accept</code></li>
+<li><code>truth_reject</code></li>
+<li><code>truth_supersede</code></li>
+<li><code>truth_show</code></li>
+<li><code>truth_list</code></li>
+<li><code>truth_validate</code></li>
+<li><code>truth_migrate_audit</code></li>
+<li><code>truth_migrate_plan</code></li>
+<li><code>truth_migrate_apply</code></li>
+</ul>
+<p>MCP mutation response contract:</p>
+<ul>
+<li>truth mutations default to compact
+<code>{ ok, truth_id, state, version }</code> style responses</li>
+<li>pass <code>verbose=true</code> for the full truth record or full
+migration result</li>
+</ul>
+<h2 id="workstream-runtime">Workstream runtime</h2>
+<p>CLI:</p>
+<ul>
+<li><code>workstream list [--json]</code></li>
+<li><code>workstream restore [--all] [--json]</code></li>
+<li><code>workstream create --name "..." [--key &lt;key&gt;] [--existing] [--path &lt;path&gt; --branch &lt;branch&gt; --from &lt;ref&gt;] [--project &lt;pid&gt;] [--epic task-123] [--objective "..."] [--tasks task-001,task-002] [--json]</code></li>
+<li><code>workstream show [&lt;id-or-key&gt;] [--truth] [--restore] [--json]</code></li>
+<li><code>workstream switch &lt;id-or-key&gt; [--json]</code></li>
+<li><code>workstream pause [&lt;id-or-key&gt;] [--json]</code></li>
+<li><code>workstream close [&lt;id-or-key&gt;] [--json]</code></li>
+<li><code>workstream reopen [&lt;id-or-key&gt;] [--json]</code></li>
+<li><code>workstream rename [&lt;id-or-key&gt;] --name "..." [--json]</code></li>
+<li><code>workstream set [&lt;id-or-key&gt;] [--key &lt;key&gt;] [--notes "..."] [--project &lt;pid&gt;] [--epic task-123] [--objective "..."] [--tasks task-001,task-002] [--json]</code></li>
+<li><code>workstream doctor [--json]</code></li>
+</ul>
+<p>MCP:</p>
+<ul>
+<li><code>workstream_list</code></li>
+<li><code>workstream_create</code></li>
+<li><code>workstream_show</code> (supports <code>truths=true</code>,
+<code>restore=true</code>)</li>
+<li><code>workstream_switch</code></li>
+<li><code>workstream_pause</code></li>
+<li><code>workstream_close</code></li>
+<li><code>workstream_reopen</code></li>
+<li><code>workstream_rename</code></li>
+<li><code>workstream_set</code></li>
+<li><code>workstream_doctor</code></li>
+<li><code>workstream_restore</code></li>
+</ul>
+<p>MCP mutation response contract:</p>
+<ul>
+<li>workstream mutations default to compact success metadata</li>
+<li>pass <code>verbose=true</code> to include the refreshed workstream
+object or full creation details</li>
+</ul>
+<p>Notes:</p>
+<ul>
+<li>Active workstream pointer is per-worktree:
+<code>workmesh/context.json.workstream_id</code>.</li>
+<li>When <code>workstream_id</code> is set, these commands keep
+workstream pointers up to date:</li>
+<li><code>session save</code> updates the active workstream
+<code>session_id</code> and worktree binding.</li>
+<li><code>worktree attach</code> updates the active workstream
+<code>session_id</code> and worktree binding.</li>
+<li><code>worktree detach</code> clears the active workstream
+<code>session_id</code> when it matches the detached session.</li>
+<li><code>context set</code> preserves <code>workstream_id</code> and
+persists the updated context snapshot into the workstream record
+(best-effort).</li>
+<li><code>workstream pause</code> and <code>workstream close</code>
+clear <code>context.json.workstream_id</code> when the paused/closed
+stream was active in this worktree.</li>
+<li><code>workstream create</code> can auto-provision a new git worktree
+when invoked from the canonical checkout and
+<code>worktrees_default=true</code> (requires a real <code>HEAD</code>
+commit). Override by passing <code>--existing</code> or explicit
+<code>--path/--branch</code>.</li>
+<li><code>workstream create</code> is idempotent for a given target
+worktree path: if that path is already bound, it returns the existing
+workstream (<code>already_exists=true</code>) instead of creating a
+duplicate.</li>
+</ul>
+<h2 id="worktree-runtime">Worktree runtime</h2>
+<p>CLI:</p>
+<ul>
+<li><code>worktree list [--json]</code></li>
+<li><code>worktree create --path &lt;path&gt; --branch &lt;branch&gt; [--from &lt;ref&gt;] [--project &lt;pid&gt;] [--epic task-123] [--objective "..."] [--tasks task-001,task-002] [--json]</code></li>
+<li><code>worktree adopt-clone --from &lt;path&gt; [--to &lt;path&gt;] [--branch &lt;target-branch&gt;] [--allow-dirty] [--apply] [--json]</code></li>
+<li><code>worktree attach [--session-id &lt;id&gt;] [--path &lt;path&gt;] [--json]</code></li>
+<li><code>worktree detach [--session-id &lt;id&gt;] [--json]</code></li>
+<li><code>worktree doctor [--json]</code></li>
+</ul>
+<p>MCP:</p>
+<ul>
+<li><code>worktree_list</code></li>
+<li><code>worktree_create</code></li>
+<li><code>worktree_adopt_clone</code></li>
+<li><code>worktree_attach</code></li>
+<li><code>worktree_detach</code></li>
+<li><code>worktree_doctor</code></li>
+</ul>
+<p>MCP mutation response contract:</p>
+<ul>
+<li>worktree mutations default to compact success metadata</li>
+<li>pass <code>verbose=true</code> to include the full
+worktree/adoption/session payload</li>
+</ul>
+<h2 id="sessions-and-continuity">Sessions and continuity</h2>
+<p>Repo-local CLI:</p>
+<ul>
+<li><code>checkpoint [--project &lt;id&gt;] [--id &lt;checkpoint-id&gt;] [--json]</code></li>
+<li><code>resume [--project &lt;id&gt;] [--id &lt;checkpoint-id&gt;] [--json]</code></li>
+<li><code>checkpoint-diff [--project &lt;id&gt;] [--id &lt;checkpoint-id&gt;] [--json]</code></li>
+<li><code>working-set [--project &lt;id&gt;] [--tasks "task-001,task-002"] [--note "..."] [--json]</code></li>
+<li><code>session-journal [--project &lt;id&gt;] [--task &lt;id&gt;] [--next "..."] [--note "..."] [--json]</code></li>
+</ul>
+<p>Global sessions CLI:</p>
+<ul>
+<li><code>session save --objective "..." [--project &lt;id&gt;] [--tasks "task-..."]</code></li>
+<li><code>session list [--limit N]</code></li>
+<li><code>session show &lt;session-id&gt;</code></li>
+<li><code>session resume [&lt;session-id&gt;]</code></li>
+<li><code>session index-rebuild|index-refresh|index-verify</code></li>
+</ul>
+<p>MCP:</p>
+<ul>
+<li><code>checkpoint</code></li>
+<li><code>resume</code></li>
+<li><code>checkpoint_diff</code></li>
+<li><code>working_set</code></li>
+<li><code>session_journal</code></li>
+<li><code>session_save</code></li>
+<li><code>session_list</code></li>
+<li><code>session_show</code></li>
+<li><code>session_resume</code></li>
+</ul>
+<p>MCP mutation response contract:</p>
+<ul>
+<li><code>session_save</code> defaults to
+<code>{ ok, session_id, cwd, repo_root }</code></li>
+<li>pass <code>verbose=true</code> to receive the full saved session
+object</li>
+</ul>
+<h2 id="migration-actions">Migration actions</h2>
+<p><code>migrate audit|plan|apply</code> may produce the following
+action ids:</p>
+<ul>
+<li><code>layout_to_split</code></li>
+<li><code>focus_to_context</code></li>
+<li><code>task_section_normalization</code></li>
+<li><code>truth_backfill</code></li>
+<li><code>session_handoff_enrichment</code></li>
+<li><code>config_cleanup</code></li>
+</ul>
+<h2 id="index-and-exports">Index and exports</h2>
+<p>CLI:</p>
+<ul>
+<li><code>index-rebuild [--json]</code></li>
+<li><code>index-refresh [--json]</code></li>
+<li><code>index-verify [--json]</code></li>
+<li><code>export [--pretty]</code></li>
+<li><code>issues-export [--output path] [--include-body]</code></li>
+<li><code>graph-export [--pretty]</code></li>
+<li><code>gantt</code>, <code>gantt-file</code>,
+<code>gantt-svg</code></li>
+</ul>
+<p>MCP:</p>
+<ul>
+<li><code>index_rebuild</code></li>
+<li><code>index_refresh</code></li>
+<li><code>index_verify</code></li>
+<li><code>export_tasks</code></li>
+<li><code>issues_export</code></li>
+<li><code>graph_export</code></li>
+<li><code>gantt_text</code>, <code>gantt_file</code>,
+<code>gantt_svg</code></li>
+</ul>
+<h2 id="renderer-tools-mcp">Renderer tools (MCP)</h2>
+<p>Available over MCP stdio:</p>
+<ul>
+<li><code>render_table</code>, <code>render_kv</code>,
+<code>render_stats</code>, <code>render_list</code>,
+<code>render_progress</code></li>
+<li><code>render_tree</code>, <code>render_diff</code>,
+<code>render_logs</code>, <code>render_alerts</code></li>
+<li><code>render_chart_bar</code>, <code>render_sparkline</code>,
+<code>render_timeline</code></li>
+</ul>
+<p>All render tools accept:</p>
+<ul>
+<li><code>data</code> (required JSON-encoded string, except
+<code>render_table</code> can use <code>data_file</code>)</li>
+<li><code>configuration</code> (optional typed object)</li>
+<li><code>format</code> (optional, only used by
+<code>render_table</code>)</li>
+</ul>
+<p><code>render_table</code> also accepts <code>data_file</code> as an
+alternative to <code>data</code>. Relative paths are resolved from the
+repo root supplied to the MCP server. Use <code>data_file</code> for
+large local JSON payloads so agents do not have to send the whole table
+through MCP arguments.</p>
+<p>For backward compatibility, native JSON values for <code>data</code>
+are still accepted by the MCP server, but agent/tool integrations should
+send the explicit JSON string form.</p>
+<p>They return rendered text content.</p>
+<h2 id="archive-and-maintenance">Archive and maintenance</h2>
+<p>CLI:</p>
+<ul>
+<li><code>archive [TASK_ID...] [--task-id &lt;id&gt;]... [--before 30d|YYYY-MM-DD] [--status &lt;state&gt;]... [--json]</code></li>
+<li>Archive writes use <code>archive/&lt;yyyy&gt;/&lt;mm&gt;/&lt;status&gt;/&lt;relative-task-path&gt;</code>. Date comes first, then normalized status, then the original path below <code>tasks/</code>.</li>
+<li>default status filter (when omitted): <code>Done</code>,
+<code>Cancelled</code>, <code>Canceled</code>, <code>Won't Do</code>,
+<code>Wont Do</code></li>
+<li>explicit task IDs archive exactly those tasks and bypass the status
+and <code>--before</code> filters; missing IDs are returned in
+<code>skipped</code></li>
+<li>override behavior: pass one or more <code>--status</code> values to
+archive any specific state, including non-terminal states</li>
+<li><code>fix list [--json]</code></li>
+<li><code>fix uid|deps|ids|filenames [--check|--apply] [--json]</code></li>
+<li><code>fix all [--only uid,deps,ids,filenames] [--exclude uid,deps,ids,filenames] [--check|--apply] [--json]</code></li>
+</ul>
+<p>MCP:</p>
+<ul>
+<li><code>archive_tasks</code></li>
+<li><code>archive_tasks</code> accepts optional <code>task_ids</code>
+(string or list) for exact task selection</li>
+<li><code>archive_tasks</code> accepts optional <code>status</code>
+(string or list); when <code>task_ids</code> and <code>status</code> are
+omitted it uses the same default terminal status filter as CLI</li>
+<li><code>fix_ids</code></li>
+<li><code>fix_filenames</code></li>
+</ul>
+<p>Filename normalization notes:</p>
+<ul>
+<li><code>fix filenames</code> derives the canonical filename from task
+<code>id</code>, <code>title</code>, and <code>uid</code>.</li>
+<li>It repairs percent-encoded or otherwise non-canonical filename
+slugs.</li>
+<li>Tasks missing <code>uid</code> are skipped; run
+<code>fix uid --apply</code> first, then rerun
+<code>fix filenames --apply</code>.</li>
+</ul>
+<p>MCP mutation response contract:</p>
+<ul>
+<li><code>archive_tasks</code> defaults to summary counts and archive
+path metadata</li>
+<li>pass <code>verbose=true</code> to include full archived/skipped
+lists</li>
+</ul>
+<h2 id="legacy-migration-minimal">Legacy migration (minimal)</h2>
+<p>Use only when a repo still has deprecated structures.</p>
+<p>CLI:</p>
+<ul>
+<li><code>migrate audit [--json]</code></li>
+<li><code>migrate plan [--include ...] [--exclude ...] [--json]</code></li>
+<li><code>migrate apply [--include ...] [--exclude ...] [--apply] [--backup] [--json]</code></li>
+</ul>
+<p>MCP:</p>
+<ul>
+<li><code>migrate_audit</code></li>
+<li><code>migrate_plan</code></li>
+<li><code>migrate_apply</code></li>
+</ul>
+<p>MCP mutation response contract:</p>
+<ul>
+<li><code>migrate_apply</code> defaults to summary counts</li>
+<li>pass <code>verbose=true</code> for the full applied/skipped/backup
+result</li>
+</ul>
+</body>
+</html>

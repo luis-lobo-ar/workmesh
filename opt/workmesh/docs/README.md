@@ -5,7 +5,8 @@ This is the canonical human guide for WorkMesh.
 If you read only one document, read this one. The rest of the docs are supporting references.
 
 Monorepo note:
-- build and evolve WorkMesh from the `mesh` repository root
+- use the standalone checkout for independent builds and installations
+- integrate product changes in the `mesh` repository root before publishing a snapshot
 - root `tasks/` is the active ecosystem backlog
 - `opt/workmesh/workmesh/` is retained only as WorkMesh-owned project/history content inside the monorepo
 
@@ -39,6 +40,10 @@ Global continuity lives under `~/.workmesh/`:
 
 ## 3. Install
 
+Use [Install WorkMesh](setup/install-and-releases.html) for prebuilt Linux x86_64 binaries, checksum verification, source installation, and snapshot release details. The current standalone distribution is [luis-lobo-ar/workmesh](https://github.com/luis-lobo-ar/workmesh). The former `luislobo/workmesh` repository retains historical releases through 0.3.9.
+
+WorkMesh ships with its required Mesh libraries. Other Mesh applications and services are optional integrations.
+
 Verify installed binaries:
 
 ```bash
@@ -51,13 +56,13 @@ Build standalone source (the same Cargo commands work from the Mesh root):
 ```bash
 git clone https://github.com/luis-lobo-ar/workmesh.git
 cd workmesh
-cargo build -p workmesh --bin workmesh
-cargo build -p workmesh-mcp --bin workmesh-mcp
+cargo build --locked --release -p workmesh -p workmesh-mcp
 ```
 
-CI/release artifact path:
-- `.github/workflows/workmesh-build.yml` tests the WorkMesh package set from the root workspace.
-- The workflow builds release artifacts for the installable operator binaries `workmesh` and `workmesh-mcp`.
+GitHub build and release workflows:
+- Mesh uses `.github/workflows/workmesh-build.yml` for package checks and operator build artifacts.
+- The standalone repository uses `.github/workflows/product.yml` to test WorkMesh and its bundled libraries, build and check `workmesh` and `workmesh-mcp`, and publish Linux x86_64 snapshot binaries with a checksum after a successful `main` build.
+- Snapshot tags use `snapshot-<standalone-commit>` and are prereleases. They do not create a new product SemVer release.
 - `workmesh-mcp-server` is a library crate exercised through tests and dependency builds; it is not an installed binary.
 
 ## 4. Agent Setup
@@ -70,13 +75,16 @@ command = "/usr/local/bin/workmesh-mcp"
 args = []
 ```
 
+Set `command` to the absolute path of your installed `workmesh-mcp`. Run `command -v workmesh-mcp` to find that path.
+
 Supported run modes:
 - CLI: `workmesh`
 - MCP stdio: `workmesh-mcp`
 
 For lower-level setup details, see:
-- [`docs/setup/run-modes-and-agent-mcp.md`](setup/run-modes-and-agent-mcp.html)
-- [`docs/reference/standalone-github-workflows.md`](reference/standalone-github-workflows.html)
+- [CLI and MCP setup](setup/run-modes-and-agent-mcp.html)
+- [Install WorkMesh](setup/install-and-releases.html)
+- [Historical standalone workflows](reference/standalone-github-workflows.html)
 - [`docs/PRD-NOTES-001-task-intent-review-gates-and-role-chains.html`](PRD-NOTES-001-task-intent-review-gates-and-role-chains.html)
 - [GUI prototype: WorkMesh Workstream Board](mockups/workmesh-workstream-board.html)
 
@@ -295,7 +303,7 @@ workmesh --root . render table --data '[{"task":"task-001","status":"Done"}]'
 - `truth migrate audit|plan|apply`
 
 For the exhaustive surface, see:
-- [`docs/reference/commands.md`](reference/commands.html)
+- [Command reference](reference/commands.html)
 
 ## 12. Renderers
 
@@ -395,10 +403,9 @@ Non-terminal statuses are archived only when explicitly requested.
 These remain useful, but they are no longer the primary entrypoint:
 - [`docs/architecture.html`](architecture.html)
 - [`docs/getting-started.html`](getting-started.html)
-- [`docs/reference/commands.md`](reference/commands.html)
-- [`docs/setup/run-modes-and-agent-mcp.md`](setup/run-modes-and-agent-mcp.html)
+- [Command reference](reference/commands.html)
+- [CLI and MCP setup](setup/run-modes-and-agent-mcp.html)
 - [`docs/test-coverage.html`](test-coverage.html)
-- [`docs/samples/workmesh-demo/README.md`](samples/workmesh-demo/README.md)
 
 ## 17. Skills
 

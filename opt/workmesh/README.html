@@ -233,9 +233,6 @@
   </style>
 </head>
 <body>
-<header id="title-block-header">
-<h1 class="title">WorkMesh</h1>
-</header>
 <h1 id="workmesh">WorkMesh</h1>
 <p>WorkMesh is a docs-first project and task orchestration system for
 developers and coding agents.</p>
@@ -246,10 +243,13 @@ crates, or download Linux snapshot binaries from its Releases page. This
 directory remains the authoritative source; the standalone repository
 receives generated snapshots. The external export supplies its own root
 Cargo workspace, without creating another workspace inside Mesh.</p>
-<p><code>Mesh</code> is now the primary repository for WorkMesh
-development. Build, test, and evolve WorkMesh from the monorepo root at
-<code>/home/luis/dev/luislobo/mesh</code>, not from a standalone sibling
-clone.</p>
+<p>The former <code>luislobo/workmesh</code> repository retains releases
+through 0.3.9. Use the current distribution for new installations.
+WorkMesh includes its required Mesh libraries and does not require
+another Mesh service.</p>
+<p>Develop WorkMesh in the Mesh monorepo. The standalone checkout
+supports independent builds and installations. Integrate source changes
+into Mesh before generating another public snapshot.</p>
 <p>It keeps planning state next to the code:</p>
 <ul>
 <li>active task and epic Markdown files under <code>tasks/</code>,
@@ -291,6 +291,9 @@ customer/project/application/feature path.</p>
 dependencies, repair duplicate task IDs, and normalize drifted task
 filenames from task metadata.</p>
 <h2 id="install">Install</h2>
+<p>For prebuilt Linux x86_64 binaries, checksum verification, source
+installation, and release details, follow <a
+href="docs/setup/install-and-releases.html">Install WorkMesh</a>.</p>
 <p>Verify installed binaries:</p>
 <div class="sourceCode" id="cb1"><pre
 class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">workmesh</span> <span class="at">--version</span></span>
@@ -300,14 +303,18 @@ root):</p>
 <div class="sourceCode" id="cb2"><pre
 class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="fu">git</span> clone https://github.com/luis-lobo-ar/workmesh.git</span>
 <span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> workmesh</span>
-<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="ex">cargo</span> build <span class="at">-p</span> workmesh <span class="at">--bin</span> workmesh</span>
-<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="ex">cargo</span> build <span class="at">-p</span> workmesh-mcp <span class="at">--bin</span> workmesh-mcp</span></code></pre></div>
-<p>CI/release artifact path:</p>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="ex">cargo</span> build <span class="at">--locked</span> <span class="at">--release</span> <span class="at">-p</span> workmesh <span class="at">-p</span> workmesh-mcp</span></code></pre></div>
+<p>GitHub build and release workflows:</p>
 <ul>
-<li><code>.github/workflows/workmesh-build.yml</code> tests the WorkMesh
-package set from the root workspace.</li>
-<li>The workflow builds release artifacts for the installable operator
-binaries <code>workmesh</code> and <code>workmesh-mcp</code>.</li>
+<li>In Mesh, <code>.github/workflows/workmesh-build.yml</code> tests
+WorkMesh and uploads operator build artifacts.</li>
+<li>In the standalone repository,
+<code>.github/workflows/product.yml</code> tests WorkMesh and its
+bundled libraries, builds and checks both operator binaries, and
+publishes an immutable Linux x86_64 snapshot with a checksum after a
+successful <code>main</code> build.</li>
+<li>Snapshot tags use <code>snapshot-&lt;standalone-commit&gt;</code>.
+They are prereleases, separate from product SemVer releases.</li>
 <li><code>workmesh-mcp-server</code> is a library crate exercised
 through tests and dependency builds; it is not an installed binary.</li>
 </ul>
@@ -316,6 +323,9 @@ through tests and dependency builds; it is not an installed binary.</li>
 class="sourceCode toml"><code class="sourceCode toml"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">[mcp_servers.workmesh]</span></span>
 <span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="dt">command</span> <span class="op">=</span> <span class="st">&quot;/usr/local/bin/workmesh-mcp&quot;</span></span>
 <span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="dt">args</span> <span class="op">=</span> <span class="op">[]</span></span></code></pre></div>
+<p>Set <code>command</code> to the absolute path of your installed
+<code>workmesh-mcp</code>. Run <code>command -v workmesh-mcp</code> to
+find that path.</p>
 <h2 id="skills">Skills</h2>
 <p>Canonical WorkMesh skills live under <code>skills/</code>.</p>
 <p>Installed agent paths follow the shared Agent Skills layout:</p>
@@ -361,18 +371,17 @@ class="sourceCode yaml"><code class="sourceCode yaml"><span id="cb4-1"><a href="
 <li><code>timemesh</code>: <code>workspaces</code>,
 <code>entries</code></li>
 </ul>
-<p>The canonical owner-scoped meanings of those foreign ids live in <a
-href="../../share/doc/architecture/cross-product-contracts.html">../../share/doc/architecture/cross-product-contracts.html</a>.
-<code>mesh_refs</code> is WorkMesh's product-local storage shape for
-preserving those external links; it does not make WorkMesh the owner of
-the referenced records.</p>
+<p><code>mesh_refs</code> preserves links to records owned by other
+products. Those products own the meaning and lifecycle of their
+identifiers. The Mesh monorepo documents the full contract at
+<code>share/doc/architecture/cross-product-contracts.html</code>.</p>
 <p>WorkMesh preserves the raw front-matter value and also exposes a
 normalized top-level <code>mesh_refs</code> object in JSON export
 surfaces.</p>
 <h2 id="documentation">Documentation</h2>
 <p>Primary documentation:</p>
 <ul>
-<li><a href="docs/README.md"><code>docs/README.md</code></a></li>
+<li><a href="docs/README.html">WorkMesh manual</a></li>
 </ul>
 <p>Supporting references:</p>
 <ul>
@@ -382,10 +391,12 @@ href="docs/architecture.html"><code>docs/architecture.html</code></a></li>
 href="docs/reference/commands.html"><code>docs/reference/commands.html</code></a></li>
 <li><a
 href="docs/setup/run-modes-and-agent-mcp.html"><code>docs/setup/run-modes-and-agent-mcp.html</code></a></li>
+<li><a href="docs/setup/install-and-releases.html">Install
+WorkMesh</a></li>
 <li><a href="CHANGELOG.md"><code>CHANGELOG.md</code></a></li>
-<li><a
-href="../../share/doc/architecture/agent-operating-environment.html">../../share/doc/architecture/agent-operating-environment.html</a></li>
 </ul>
+<p>Mesh-wide operating guidance is maintained in the monorepo at
+<code>share/doc/architecture/agent-operating-environment.html</code>.</p>
 <p>Monorepo note:</p>
 <ul>
 <li>ecosystem-wide planning and active implementation tracking live at
@@ -408,8 +419,8 @@ compare-and-mutate claim, check, renewal, evidence-note and atomic
 Done/lease-clear operations bound to task UID and Description/AC/DoD.
 The AgentMesh worker consumes this library API; existing CLI
 claim/release remain explicit operator overrides, not conditional
-supervisor APIs. See the <a
-href="../agentmesh/docs/AGENTMESH-SUPERVISOR-RUNBOOK.html">supervisor
-runbook</a>.</p>
+supervisor APIs. AgentMesh is an optional consumer. Its supervisor
+runbook is maintained in the Mesh monorepo at
+<code>opt/agentmesh/docs/AGENTMESH-SUPERVISOR-RUNBOOK.html</code>.</p>
 </body>
 </html>

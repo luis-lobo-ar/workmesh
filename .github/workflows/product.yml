@@ -22,6 +22,10 @@ jobs:
         env:
           RUSTFLAGS: ""
         run: cargo build --locked --release -p workmesh -p workmesh-mcp
+      - name: Check operator binaries
+        run: |
+          target/release/workmesh --version
+          target/release/workmesh-mcp --version
       - name: Package binaries and notices
         run: |
           mkdir -p dist/workmesh-linux-x86_64/bin

@@ -5,14 +5,17 @@
     "repository": "https://github.com/luis-lobo-ar/workmesh",
     "releases": "https://github.com/luis-lobo-ar/workmesh/releases",
     "authority": "Mesh monorepo; standalone repository is a generated snapshot",
-    "export": "bin/export-product workmesh <empty-directory-outside-Mesh>"
+    "export": "bin/export-product workmesh <empty-directory-outside-Mesh>",
+    "platform": "Linux x86_64 snapshot prereleases",
+    "legacy_repository": "https://github.com/luislobo/workmesh (historical releases through 0.3.9)"
   },
   "summary": [
     "WorkMesh keeps repo-local planning state next to code.",
-    "Primary human documentation lives in docs/README.md.",
+    "Primary human documentation lives in docs/README.html.",
     "README.md is a short landing page with install and links.",
     "The mesh monorepo root is the primary source of truth for active WorkMesh development.",
-    "WorkMesh discovers active task and epic Markdown files recursively under tasks/ for customer/project/application/feature organization."
+    "WorkMesh discovers active task and epic Markdown files recursively under tasks/ for customer/project/application/feature organization.",
+    "WorkMesh includes its required Mesh libraries and runs without another Mesh service."
   ],
   "artifacts": {
     "cli": "workmesh",
@@ -42,20 +45,22 @@
     "build_from_source": [
       "git clone https://github.com/luis-lobo-ar/workmesh.git",
       "cd workmesh",
-      "cargo build -p workmesh",
-      "cargo build -p workmesh-mcp"
+      "cargo build --locked --release -p workmesh -p workmesh-mcp"
     ],
     "codex_mcp_example": {
       "command": "/usr/local/bin/workmesh-mcp",
       "args": []
-    }
+    },
+    "binary_guide": "docs/setup/install-and-releases.html",
+    "mcp_command_path": "Use the absolute installed workmesh-mcp path. Find it with command -v workmesh-mcp."
   },
   "canonical_docs": {
-    "manual": "docs/README.md",
-    "architecture": "docs/architecture.md",
-    "commands": "docs/reference/commands.md",
-    "setup": "docs/setup/run-modes-and-agent-mcp.md",
-    "changelog": "CHANGELOG.md"
+    "manual": "docs/README.html",
+    "architecture": "docs/architecture.html",
+    "commands": "docs/reference/commands.html",
+    "setup": "docs/setup/run-modes-and-agent-mcp.html",
+    "changelog": "CHANGELOG.md",
+    "installation": "docs/setup/install-and-releases.html"
   },
   "monorepo": {
     "source_of_truth": "mesh repository root",
@@ -137,6 +142,17 @@
   "supervisor_ownership": {
     "library": "workmesh-core::conditional_owner",
     "contract": "Atomic locked claim/check/renew/note/Done-and-lease-clear compare task UID, Description/AC/DoD and live campaign owner. CLI claim/release remain explicit operator overrides.",
-    "runbook": "../agentmesh/docs/AGENTMESH-SUPERVISOR-RUNBOOK.html"
+    "runbook_in_mesh": "opt/agentmesh/docs/AGENTMESH-SUPERVISOR-RUNBOOK.html",
+    "optional_consumer": "AgentMesh supervisor. WorkMesh does not require AgentMesh."
+  },
+  "github_builds": {
+    "monorepo_workflow": ".github/workflows/workmesh-build.yml",
+    "standalone_workflow": ".github/workflows/product.yml",
+    "binaries": [
+      "workmesh",
+      "workmesh-mcp"
+    ],
+    "platform": "Linux x86_64",
+    "release": "Immutable snapshot-<standalone-commit> prerelease after successful main tests, builds and binary checks."
   }
 }

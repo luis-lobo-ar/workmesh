@@ -233,17 +233,16 @@
   </style>
 </head>
 <body>
-<header id="title-block-header">
-<h1 class="title">WorkMesh Documentation</h1>
-</header>
 <h1 id="workmesh-documentation">WorkMesh Documentation</h1>
 <p>This is the canonical human guide for WorkMesh.</p>
 <p>If you read only one document, read this one. The rest of the docs
 are supporting references.</p>
 <p>Monorepo note:</p>
 <ul>
-<li>build and evolve WorkMesh from the <code>mesh</code> repository
-root</li>
+<li>use the standalone checkout for independent builds and
+installations</li>
+<li>integrate product changes in the <code>mesh</code> repository root
+before publishing a snapshot</li>
 <li>root <code>tasks/</code> is the active ecosystem backlog</li>
 <li><code>opt/workmesh/workmesh/</code> is retained only as
 WorkMesh-owned project/history content inside the monorepo</li>
@@ -280,6 +279,15 @@ updates</li>
 <li>indexes and integrity metadata</li>
 </ul>
 <h2 id="3-install">3. Install</h2>
+<p>Use <a href="setup/install-and-releases.html">Install WorkMesh</a>
+for prebuilt Linux x86_64 binaries, checksum verification, source
+installation, and snapshot release details. The current standalone
+distribution is <a
+href="https://github.com/luis-lobo-ar/workmesh">luis-lobo-ar/workmesh</a>.
+The former <code>luislobo/workmesh</code> repository retains historical
+releases through 0.3.9.</p>
+<p>WorkMesh ships with its required Mesh libraries. Other Mesh
+applications and services are optional integrations.</p>
 <p>Verify installed binaries:</p>
 <div class="sourceCode" id="cb1"><pre
 class="sourceCode bash"><code class="sourceCode bash"><span id="cb1-1"><a href="#cb1-1" aria-hidden="true" tabindex="-1"></a><span class="ex">workmesh</span> <span class="at">--version</span></span>
@@ -289,14 +297,19 @@ root):</p>
 <div class="sourceCode" id="cb2"><pre
 class="sourceCode bash"><code class="sourceCode bash"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="fu">git</span> clone https://github.com/luis-lobo-ar/workmesh.git</span>
 <span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> workmesh</span>
-<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="ex">cargo</span> build <span class="at">-p</span> workmesh <span class="at">--bin</span> workmesh</span>
-<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a><span class="ex">cargo</span> build <span class="at">-p</span> workmesh-mcp <span class="at">--bin</span> workmesh-mcp</span></code></pre></div>
-<p>CI/release artifact path:</p>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a><span class="ex">cargo</span> build <span class="at">--locked</span> <span class="at">--release</span> <span class="at">-p</span> workmesh <span class="at">-p</span> workmesh-mcp</span></code></pre></div>
+<p>GitHub build and release workflows:</p>
 <ul>
-<li><code>.github/workflows/workmesh-build.yml</code> tests the WorkMesh
-package set from the root workspace.</li>
-<li>The workflow builds release artifacts for the installable operator
-binaries <code>workmesh</code> and <code>workmesh-mcp</code>.</li>
+<li>Mesh uses <code>.github/workflows/workmesh-build.yml</code> for
+package checks and operator build artifacts.</li>
+<li>The standalone repository uses
+<code>.github/workflows/product.yml</code> to test WorkMesh and its
+bundled libraries, build and check <code>workmesh</code> and
+<code>workmesh-mcp</code>, and publish Linux x86_64 snapshot binaries
+with a checksum after a successful <code>main</code> build.</li>
+<li>Snapshot tags use <code>snapshot-&lt;standalone-commit&gt;</code>
+and are prereleases. They do not create a new product SemVer
+release.</li>
 <li><code>workmesh-mcp-server</code> is a library crate exercised
 through tests and dependency builds; it is not an installed binary.</li>
 </ul>
@@ -306,6 +319,9 @@ through tests and dependency builds; it is not an installed binary.</li>
 class="sourceCode toml"><code class="sourceCode toml"><span id="cb3-1"><a href="#cb3-1" aria-hidden="true" tabindex="-1"></a><span class="kw">[mcp_servers.workmesh]</span></span>
 <span id="cb3-2"><a href="#cb3-2" aria-hidden="true" tabindex="-1"></a><span class="dt">command</span> <span class="op">=</span> <span class="st">&quot;/usr/local/bin/workmesh-mcp&quot;</span></span>
 <span id="cb3-3"><a href="#cb3-3" aria-hidden="true" tabindex="-1"></a><span class="dt">args</span> <span class="op">=</span> <span class="op">[]</span></span></code></pre></div>
+<p>Set <code>command</code> to the absolute path of your installed
+<code>workmesh-mcp</code>. Run <code>command -v workmesh-mcp</code> to
+find that path.</p>
 <p>Supported run modes:</p>
 <ul>
 <li>CLI: <code>workmesh</code></li>
@@ -313,10 +329,11 @@ class="sourceCode toml"><code class="sourceCode toml"><span id="cb3-1"><a href="
 </ul>
 <p>For lower-level setup details, see:</p>
 <ul>
-<li><a
-href="setup/run-modes-and-agent-mcp.html"><code>docs/setup/run-modes-and-agent-mcp.md</code></a></li>
-<li><a
-href="reference/standalone-github-workflows.html"><code>docs/reference/standalone-github-workflows.md</code></a></li>
+<li><a href="setup/run-modes-and-agent-mcp.html">CLI and MCP
+setup</a></li>
+<li><a href="setup/install-and-releases.html">Install WorkMesh</a></li>
+<li><a href="reference/standalone-github-workflows.html">Historical
+standalone workflows</a></li>
 <li><a
 href="PRD-NOTES-001-task-intent-review-gates-and-role-chains.html"><code>docs/PRD-NOTES-001-task-intent-review-gates-and-role-chains.html</code></a></li>
 <li><a href="mockups/workmesh-workstream-board.html">GUI prototype:
@@ -539,8 +556,7 @@ Families</h2>
 </ul>
 <p>For the exhaustive surface, see:</p>
 <ul>
-<li><a
-href="reference/commands.html"><code>docs/reference/commands.md</code></a></li>
+<li><a href="reference/commands.html">Command reference</a></li>
 </ul>
 <h2 id="12-renderers">12. Renderers</h2>
 <p>WorkMesh has native renderers for human-friendly output:</p>
@@ -642,14 +658,11 @@ entrypoint:</p>
 href="architecture.html"><code>docs/architecture.html</code></a></li>
 <li><a
 href="getting-started.html"><code>docs/getting-started.html</code></a></li>
-<li><a
-href="reference/commands.html"><code>docs/reference/commands.md</code></a></li>
-<li><a
-href="setup/run-modes-and-agent-mcp.html"><code>docs/setup/run-modes-and-agent-mcp.md</code></a></li>
+<li><a href="reference/commands.html">Command reference</a></li>
+<li><a href="setup/run-modes-and-agent-mcp.html">CLI and MCP
+setup</a></li>
 <li><a
 href="test-coverage.html"><code>docs/test-coverage.html</code></a></li>
-<li><a
-href="samples/workmesh-demo/README.md"><code>docs/samples/workmesh-demo/README.md</code></a></li>
 </ul>
 <h2 id="17-skills">17. Skills</h2>
 <p>WorkMesh uses a layered skill model so agents do not have to

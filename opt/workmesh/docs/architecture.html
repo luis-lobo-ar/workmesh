@@ -238,7 +238,7 @@
 </header>
 <h1 id="workmesh-architecture">WorkMesh Architecture</h1>
 <h2 id="mesh-operating-context-alignment">Mesh Operating Context Alignment</h2>
-<p>WorkMesh is the task, dependency, readiness, and approval-gate authority inside the <a href="../../../share/doc/architecture/mesh-operating-context.html">Mesh operating context model</a>. WorkMesh tasks and workstreams may carry organization, product, repo, worktree, Guildmesh room, AgentMesh session, ShipMesh environment/deployment, TestMesh run, VaultMesh secret-scope, and TimeMesh report references.</p>
+<p>WorkMesh owns tasks, dependencies, readiness, and approval gates. Tasks and workstreams may carry references to organizations, products, repositories, worktrees, and other Mesh products. These integrations are optional. WorkMesh runs independently with its bundled libraries. The full Mesh operating context model is maintained in the monorepo at <code>share/doc/architecture/mesh-operating-context.html</code>.</p>
 <p>WorkMesh does not own room discussion, agent process execution, Git worktree lifecycle, deployment environments, preview URLs, secrets, test evidence, or time entries. It should store typed refs and gate state only.</p>
 
 <p>This page documents the current WorkMesh application architecture

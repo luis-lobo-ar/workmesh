@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Install WorkMesh</title></head>
+<body>
+<h1>Install WorkMesh</h1>
+<p>Use the <a href="https://github.com/luis-lobo-ar/workmesh">current standalone repository</a> for source and <a href="https://github.com/luis-lobo-ar/workmesh/releases">Releases</a> for prebuilt binaries. The former <code>luislobo/workmesh</code> repository retains historical releases through 0.3.9.</p>
+<h2>Install the Linux snapshot</h2>
+<ol>
+<li>Open Releases and select a <code>snapshot-&lt;standalone-commit&gt;</code> prerelease. Current downloads target Linux x86_64 and build on Ubuntu 24.04.</li>
+<li>Download <code>workmesh-linux-x86_64.tar.gz</code> and its <code>.sha256</code> file into the same directory.</li>
+<li>In that directory, verify and extract the archive.</li>
+</ol>
+<pre><code>sha256sum --check workmesh-linux-x86_64.tar.gz.sha256
+tar -xzf workmesh-linux-x86_64.tar.gz</code></pre>
+<p>The checksum command must report <code>OK</code>. Install both executables into a directory on your PATH.</p>
+<pre><code>install -Dm755 workmesh-linux-x86_64/bin/workmesh "$HOME/.local/bin/workmesh"
+install -Dm755 workmesh-linux-x86_64/bin/workmesh-mcp "$HOME/.local/bin/workmesh-mcp"
+workmesh --version
+workmesh-mcp --version</code></pre>
+<p>If your shell cannot find the commands, add <code>$HOME/.local/bin</code> to PATH. Both version strings must identify the selected standalone commit. The Git commit count can differ between a full source checkout and GitHub's shallow checkout.</p>
+<p>The archive includes <code>mesh-export.json</code>, license notices, and both binaries. The manifest records the authoritative Mesh source revision and exported file hashes.</p>
+<h2>Build from source</h2>
+<p>Install Git and the stable Rust toolchain, then run these commands.</p>
+<pre><code>git clone https://github.com/luis-lobo-ar/workmesh.git
+cd workmesh
+cargo build --locked --release -p workmesh -p workmesh-mcp
+target/release/workmesh --version
+target/release/workmesh-mcp --version</code></pre>
+<p>To install from the checkout, use Cargo.</p>
+<pre><code>cargo install --locked --path opt/workmesh/crates/workmesh-cli
+cargo install --locked --path opt/workmesh/crates/workmesh-mcp</code></pre>
+<p>WorkMesh includes its required Mesh libraries. It does not require AgentMesh, Telegram, or another Mesh service. Other platforms require a source build and are not validated by the Linux release workflow.</p>
+<h2>Check the GitHub build</h2>
+<p>In the standalone repository, <code>.github/workflows/product.yml</code> tests WorkMesh and its bundled libraries, builds <code>workmesh</code> and <code>workmesh-mcp</code>, runs both version commands, and packages the binaries with notices and a checksum. A successful <code>main</code> build publishes an immutable snapshot prerelease. Pull requests run build checks without publishing a release. See <a href="https://github.com/luis-lobo-ar/workmesh/actions">GitHub Actions</a> for results.</p>
+<p>In the Mesh monorepo, <code>.github/workflows/workmesh-build.yml</code> runs package checks and uploads operator build artifacts. The YAML files under <code>docs/reference/</code> describe the former standalone workflows and are historical references.</p>
+<p>Snapshot publication preserves the current product version, currently 0.4.0. The snapshot tag and binary Git suffix identify the exact standalone revision. Releases through 0.3.9 remain in the former repository.</p>
+<p>Continue with the <a href="../README.html">WorkMesh manual</a> or <a href="run-modes-and-agent-mcp.html">CLI and MCP setup</a>.</p>
+</body></html>

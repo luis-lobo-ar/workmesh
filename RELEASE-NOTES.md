@@ -1,1 +1,1 @@
-Linux x86_64 snapshot of workmesh from Mesh commit 618e74dd751c59714a1a8336c2d08b581e5f16a7. This is a prerelease distribution snapshot, not a new product SemVer release. See mesh-export.json for source provenance and notices.
+Linux x86_64 snapshot of workmesh from Mesh commit cfb59d1656b5a63038e9f92f84ea07102d3b03e9. This is a prerelease distribution snapshot, not a new product SemVer release. See mesh-export.json for source provenance and notices.

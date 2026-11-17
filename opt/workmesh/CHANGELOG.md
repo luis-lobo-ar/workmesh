@@ -9,9 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Conditional owning-core task claim/check/renew/note/complete operations for cooperative supervisors, atomically pinned to UID, task contract and live owner under the existing path lock. Operator CLI overrides remain unchanged.
+- Standalone GitHub builds check both operator binary versions before packaging and publication.
 
 ### Fixed
 - CLI/MCP parity tests locate binaries through Cargo's executable metadata instead of assuming a fixed integration-test artifact layout.
+- Standalone installation and release guidance now identifies the current public repository, supported Linux snapshot binaries, checksum verification, and the correct GitHub workflows. Exported human and agent documentation links resolve within the distribution.
 
 ## [0.4.0] - 2026-07-10
 
@@ -392,8 +394,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Gantt support and best-practices command.
   - Docs-first project model and initial PRDs.
 
-[Unreleased]: https://github.com/luislobo/workmesh/compare/v0.4.0...HEAD
-[0.4.0]: https://github.com/luislobo/workmesh/compare/v0.3.9...v0.4.0
+[Unreleased]: https://github.com/luis-lobo-ar/workmesh/commits/main/
+[0.4.0]: https://github.com/luis-lobo-ar/workmesh/releases
 [0.3.9]: https://github.com/luislobo/workmesh/compare/v0.3.8...v0.3.9
 [0.3.8]: https://github.com/luislobo/workmesh/compare/v0.3.7...v0.3.8
 [0.3.7]: https://github.com/luislobo/workmesh/compare/v0.3.6...v0.3.7

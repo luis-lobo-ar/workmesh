@@ -401,5 +401,15 @@ repository or alternate source of truth</li>
 <ul>
 <li><a href="README.json"><code>README.json</code></a></li>
 </ul>
+<h2 id="cooperative-supervisor-ownership">Cooperative supervisor
+ownership</h2>
+<p><code>workmesh-core::conditional_owner</code> provides locked
+compare-and-mutate claim, check, renewal, evidence-note and atomic
+Done/lease-clear operations bound to task UID and Description/AC/DoD.
+The AgentMesh worker consumes this library API; existing CLI
+claim/release remain explicit operator overrides, not conditional
+supervisor APIs. See the <a
+href="../agentmesh/docs/AGENTMESH-SUPERVISOR-RUNBOOK.html">supervisor
+runbook</a>.</p>
 </body>
 </html>

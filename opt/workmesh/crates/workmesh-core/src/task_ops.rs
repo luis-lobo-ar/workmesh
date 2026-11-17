@@ -1603,7 +1603,7 @@ fn should_warn_missing_dependencies(task: &Task) -> bool {
     task.dependencies.is_empty()
 }
 
-fn extract_section_content(body: &str, section: &str) -> Option<String> {
+pub(crate) fn extract_section_content(body: &str, section: &str) -> Option<String> {
     let lines: Vec<&str> = body.lines().collect();
     let start_header = lines
         .iter()

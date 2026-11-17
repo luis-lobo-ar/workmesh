@@ -115,3 +115,11 @@ Monorepo note:
 
 Agent-readable mirror:
 - [`README.json`](README.json)
+
+## Cooperative supervisor ownership
+
+`workmesh-core::conditional_owner` provides locked compare-and-mutate claim,
+check, renewal, evidence-note and atomic Done/lease-clear operations bound to task
+UID and Description/AC/DoD. The AgentMesh worker consumes this library API; existing
+CLI claim/release remain explicit operator overrides, not conditional supervisor APIs.
+See the [supervisor runbook](../agentmesh/docs/AGENTMESH-SUPERVISOR-RUNBOOK.html).

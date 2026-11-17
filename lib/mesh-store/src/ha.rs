@@ -4,6 +4,9 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod scope;
+pub use scope::{AuthorityScope, AuthorityScopeError};
+
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct HaResourceRef {
     pub scope: String,

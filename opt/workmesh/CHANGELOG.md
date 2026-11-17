@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Conditional owning-core task claim/check/renew/note/complete operations for cooperative supervisors, atomically pinned to UID, task contract and live owner under the existing path lock. Operator CLI overrides remain unchanged.
+
 ## [0.4.0] - 2026-07-10
 
 ### Added

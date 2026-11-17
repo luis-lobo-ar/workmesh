@@ -133,5 +133,10 @@
     "workmesh": "CLI adapter",
     "workmesh-mcp-server": "MCP adapter",
     "workmesh-mcp": "stdio wrapper"
+  },
+  "supervisor_ownership": {
+    "library": "workmesh-core::conditional_owner",
+    "contract": "Atomic locked claim/check/renew/note/Done-and-lease-clear compare task UID, Description/AC/DoD and live campaign owner. CLI claim/release remain explicit operator overrides.",
+    "runbook": "../agentmesh/docs/AGENTMESH-SUPERVISOR-RUNBOOK.html"
   }
 }

@@ -1,7 +1,7 @@
 {
   "name": "workmesh",
   "source_of_truth": "Mesh monorepo",
-  "source_sha": "8991833d58325eaf3ee63b68e6c0655bee6b9c28",
+  "source_sha": "4011008b37a63fa07a8f2ff2303eb091f270a1e5",
   "standalone_repository": "https://github.com/luis-lobo-ar/workmesh",
   "build": "cargo build --locked --release -p workmesh -p workmesh-mcp",
   "test": "cargo test --locked -p mesh-config -p mesh-id -p mesh-store -p mesh-testkit -p workmesh -p workmesh-core -p workmesh-mcp -p workmesh-mcp-server -p workmesh-render -p workmesh-tools",

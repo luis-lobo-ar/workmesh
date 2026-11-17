@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - Conditional owning-core task claim/check/renew/note/complete operations for cooperative supervisors, atomically pinned to UID, task contract and live owner under the existing path lock. Operator CLI overrides remain unchanged.
 
+### Fixed
+- CLI/MCP parity tests locate binaries through Cargo's executable metadata instead of assuming a fixed integration-test artifact layout.
+
 ## [0.4.0] - 2026-07-10
 
 ### Added

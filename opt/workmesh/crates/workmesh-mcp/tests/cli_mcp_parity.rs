@@ -119,9 +119,7 @@ fn cli() -> Command {
 }
 
 fn mcp_bin() -> PathBuf {
-    // Cargo sets CARGO_BIN_EXE_* only for binaries built for the current package; when running
-    // workspace-level tests with a custom --target-dir, it's more reliable to resolve relative to
-    // the test executable and build into that same target dir on demand.
+    // Use Cargo's binary location so custom target directories and relocated test artifacts agree.
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
     let root = std::path::Path::new(&manifest_dir)
         .parent()
@@ -158,10 +156,8 @@ fn exe_name(stem: &str) -> String {
 }
 
 fn cargo_profile_dir() -> PathBuf {
-    // <target-dir>/<profile>/deps/<test-binary>
-    let exe = std::env::current_exe().expect("current_exe");
-    exe.parent()
-        .and_then(|p| p.parent())
+    Path::new(env!("CARGO_BIN_EXE_workmesh-mcp"))
+        .parent()
         .map(|p| p.to_path_buf())
         .expect("profile dir")
 }

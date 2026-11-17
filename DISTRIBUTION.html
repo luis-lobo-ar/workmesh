@@ -15,7 +15,7 @@ Product source and manuals: [opt/workmesh](opt/workmesh/). [Standalone guide](DI
 
 Authoritative development: the Mesh monorepo. This repository receives generated snapshots. Open issues here; proposed changes must be integrated into Mesh by its maintainer before the next snapshot. Do not edit the generated shared crates independently.
 
-Source commit: `4011008b37a63fa07a8f2ff2303eb091f270a1e5`. Full file hashes and exporter provenance: [mesh-export.json](mesh-export.json). No private monorepo history, active task records or session data are included.
+Source commit: `618e74dd751c59714a1a8336c2d08b581e5f16a7`. Full file hashes and exporter provenance: [mesh-export.json](mesh-export.json). No private monorepo history, active task records or session data are included.
 
 MIT licensed Mesh code; third-party assets retain the notices in LICENSES.txt and their original licenses.
 
